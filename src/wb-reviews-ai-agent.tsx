@@ -57,6 +57,43 @@ const getPhotoUrl = (photo: PhotoInfo, useFullSize = false): string => {
   return useFullSize ? photo.fullSize : photo.miniSize;
 };
 
+// Функция для отображения статуса ответа
+const getAnswerStatusDisplay = (state?: string, editable?: boolean) => {
+  const statusMap: Record<string, { text: string; color: string; icon: string; description: string }> = {
+    'wbRu': {
+      text: 'Опубликован',
+      color: 'success',
+      icon: '✅',
+      description: 'Ответ опубликован на Wildberries для всех пользователей'
+    },
+    'none': {
+      text: 'Без ответа',
+      color: 'default',
+      icon: '⚫',
+      description: 'На этот отзыв еще нет ответа'
+    },
+    'suppliersPortalSynch': {
+      text: 'Синхронизация',
+      color: 'processing',
+      icon: '🔄',
+      description: 'Ответ синхронизируется с порталом поставщиков'
+    }
+  };
+
+  const status = statusMap[state || 'none'] || {
+    text: `Неизвестный: ${state}`,
+    color: 'warning',
+    icon: '❓',
+    description: `Неизвестный статус: ${state}`
+  };
+
+  return {
+    ...status,
+    editable: editable === true,
+    editableText: editable ? 'Можно редактировать' : 'Нельзя редактировать'
+  };
+};
+
 // Интерфейсы для типизации
 interface VideoInfo {
   previewImage: string;
@@ -84,6 +121,8 @@ interface FeedbackData {
   };
   answer?: {
     text: string;
+    state?: string;      // wbRu, none, suppliersPortalSynch, etc.
+    editable?: boolean;  // можно ли редактировать (в течение 60 дней)
   };
   // Медиафайлы согласно официальной документации Wildberries
   photoLinks?: PhotoInfo[];
@@ -937,12 +976,37 @@ function FeedbackCard({ feedback, onReply, aiReply, onGenerateReply, isGeneratin
         </div>
 
         {feedback.answer ? (
-          <Alert
-            message="Ваш ответ:"
-            description={feedback.answer.text}
-            type="info"
-            showIcon
-          />
+          <div>
+            {(() => {
+              const statusInfo = getAnswerStatusDisplay(feedback.answer.state, feedback.answer.editable);
+              return (
+                <Alert
+                  message={
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                      <span>Ваш ответ:</span>
+                      <Space>
+                        <Tooltip title={statusInfo.description}>
+                          <Tag color={statusInfo.color}>
+                            {statusInfo.icon} {statusInfo.text}
+                          </Tag>
+                        </Tooltip>
+                        {statusInfo.editable && (
+                          <Tooltip title="Ответ можно редактировать в течение 60 дней">
+                            <Tag color="blue">
+                              <EditOutlined /> Редактируемый
+                            </Tag>
+                          </Tooltip>
+                        )}
+                      </Space>
+                    </div>
+                  }
+                  description={feedback.answer.text}
+                  type={statusInfo.color === 'success' ? 'success' : 'info'}
+                  showIcon
+                />
+              );
+            })()}
+          </div>
         ) : (
           <Space direction="vertical" size="middle" style={{ width: '100%' }}>
             {replyText && (
@@ -1105,6 +1169,32 @@ export default function WildberriesReviewsAI() {
         withMedia: withMedia.length,
         photoCount,
         videoCount
+      });
+
+      // Анализ статусов ответов
+      const answerStatuses = new Set<string>();
+      const answerStats = {
+        total: feedbacks.length,
+        withAnswers: 0,
+        editableAnswers: 0,
+        statusBreakdown: {} as Record<string, number>
+      };
+
+      feedbacks.forEach(f => {
+        if (f.answer) {
+          answerStats.withAnswers++;
+          if (f.answer.editable) {
+            answerStats.editableAnswers++;
+          }
+          const state = f.answer.state || 'none';
+          answerStatuses.add(state);
+          answerStats.statusBreakdown[state] = (answerStats.statusBreakdown[state] || 0) + 1;
+        }
+      });
+
+      console.log(`🔄 Статистика статусов ответов:`, {
+        ...answerStats,
+        allStatuses: Array.from(answerStatuses)
       });
       
       // Детальная информация о первых медиафайлах
@@ -1431,6 +1521,9 @@ export default function WildberriesReviewsAI() {
                   <Text type="secondary">
                     Без ответа: {stats.countUnanswered} • Рейтинг: {stats.valuation} • 
                     Загружено: {allFeedbacks.length} • Показано: {filteredFeedbacks.length}
+                    {allFeedbacks.some(f => f.answer) && (
+                      <span> • Отвечено: {allFeedbacks.filter(f => f.answer).length}</span>
+                    )}
                   </Text>
                 )}
               </Space>
@@ -1537,6 +1630,30 @@ export default function WildberriesReviewsAI() {
                   </div>
                 }
                 type="success"
+                showIcon
+                closable
+                style={{ marginBottom: 16 }}
+              />
+            )}
+
+            {/* Информация о статусах ответов */}
+            {filteredFeedbacks.some(f => f.answer) && (
+              <Alert
+                message="🔄 Мониторинг статусов ответов"
+                description={
+                  <div>
+                    <p style={{ margin: 0, marginBottom: 8 }}>
+                      <strong>📊 Отслеживание состояния ваших ответов:</strong> Теперь вы видите актуальные статусы всех отправленных ответов.
+                    </p>
+                    <ul style={{ margin: 0, paddingLeft: 16 }}>
+                      <li><strong>✅ Опубликован:</strong> Ответ виден всем пользователям Wildberries</li>
+                      <li><strong>🔄 Синхронизация:</strong> Ответ обрабатывается системой WB</li>
+                      <li><strong>📝 Редактируемый:</strong> Можно изменить в течение 60 дней</li>
+                      <li><strong>Консоль браузера:</strong> Подробная статистика всех статусов в логах</li>
+                    </ul>
+                  </div>
+                }
+                type="info"
                 showIcon
                 closable
                 style={{ marginBottom: 16 }}
