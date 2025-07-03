@@ -18,7 +18,14 @@ import {
   Collapse,
   Drawer,
   Form,
-  ConfigProvider
+  ConfigProvider,
+  Image,
+  Modal,
+  Badge,
+  Checkbox,
+  Dropdown,
+  Menu,
+  Tooltip
 } from 'antd';
 import { 
   SendOutlined, 
@@ -28,7 +35,16 @@ import {
   RobotOutlined,
   EditOutlined,
   CheckOutlined,
-  CloseOutlined
+  CloseOutlined,
+  PictureOutlined,
+  VideoCameraOutlined,
+  PlayCircleOutlined,
+  EyeOutlined,
+  FilterOutlined,
+  StarOutlined,
+  StarFilled,
+  LeftOutlined,
+  RightOutlined
 } from '@ant-design/icons';
 
 const { Header, Content } = Layout;
@@ -36,7 +52,23 @@ const { Title, Text, Paragraph } = Typography;
 const { TextArea } = Input;
 const { Panel } = Collapse;
 
+// Вспомогательная функция для извлечения URL из PhotoInfo
+const getPhotoUrl = (photo: PhotoInfo, useFullSize = false): string => {
+  return useFullSize ? photo.fullSize : photo.miniSize;
+};
+
 // Интерфейсы для типизации
+interface VideoInfo {
+  previewImage: string;
+  link: string;
+  durationSec: number;
+}
+
+interface PhotoInfo {
+  fullSize: string;
+  miniSize: string;
+}
+
 interface FeedbackData {
   id: string;
   userName?: string;
@@ -53,6 +85,9 @@ interface FeedbackData {
   answer?: {
     text: string;
   };
+  // Медиафайлы согласно официальной документации Wildberries
+  photoLinks?: PhotoInfo[];
+  video?: VideoInfo;
 }
 
 interface StatsData {
@@ -77,7 +112,7 @@ class WildberriesAPI {
     this.baseUrl = 'https://feedbacks-api.wildberries.ru';
   }
 
-  async getFeedbacks(isAnswered = false, take = 50, skip = 0): Promise<APIResponse<{ feedbacks: FeedbackData[] }>> {
+  async getFeedbacks(isAnswered = false, take = 100, skip = 0): Promise<APIResponse<{ feedbacks: FeedbackData[] }>> {
     try {
       const response = await fetch(
         `${this.baseUrl}/api/v1/feedbacks?isAnswered=${isAnswered}&take=${take}&skip=${skip}&order=dateDesc`,
@@ -151,14 +186,28 @@ class OpenAIAPI {
     3. Если отзыв негативный - извинись и предложи решение
     4. Если отзыв позитивный - поблагодари и пригласи снова
     5. Ответ должен быть от 50 до 300 символов
-    6. Обращайся к покупателю по имени, если оно указано`;
+    6. Обращайся к покупателю по имени, если оно указано
+    7. Если к отзыву прикреплены фото/видео, можешь упомянуть благодарность за наглядную демонстрацию`;
+
+    // Проверяем наличие медиафайлов
+    const hasPhotos = !!(feedback.photoLinks?.length);
+    const hasVideo = !!feedback.video;
+    const hasMedia = hasPhotos || hasVideo;
+    
+    let mediaInfo = '';
+    if (hasMedia) {
+      const mediaTypes = [];
+      if (hasPhotos) mediaTypes.push('фотографии');
+      if (hasVideo) mediaTypes.push('видео');
+      mediaInfo = `\nК отзыву прикреплены: ${mediaTypes.join(' и ')}`;
+    }
 
     const userPrompt = `Отзыв от ${feedback.userName || 'покупателя'}:
     Товар: ${feedback.productDetails?.productName || 'Неизвестный товар'}
     Оценка: ${feedback.productValuation}/5
     Текст: ${feedback.text || ''}
     ${feedback.pros ? `Достоинства: ${feedback.pros}` : ''}
-    ${feedback.cons ? `Недостатки: ${feedback.cons}` : ''}
+    ${feedback.cons ? `Недостатки: ${feedback.cons}` : ''}${mediaInfo}
     
     Напиши ответ на этот отзыв.`;
 
@@ -198,6 +247,614 @@ interface FeedbackCardProps {
   isGenerating: boolean;
 }
 
+// Компонент безопасной загрузки изображений
+function SafeImage({ src, alt, style, width, height, onClick }: {
+  src: string;
+  alt?: string;
+  style?: React.CSSProperties;
+  width?: number;
+  height?: number;
+  onClick?: () => void;
+}) {
+  const [imageStatus, setImageStatus] = useState<'loading' | 'success' | 'error'>('loading');
+  const [imageSrc, setImageSrc] = useState(src);
+  const [proxyIndex, setProxyIndex] = useState(-1);
+
+  // Список прокси серверов для обхода CORS
+  const corsProxies = [
+    (url: string) => url, // Сначала пробуем оригинальный URL
+    (url: string) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(url)}`,
+    (url: string) => `https://api.allorigins.win/raw?url=${encodeURIComponent(url)}`,
+    (url: string) => `https://corsproxy.io/?${encodeURIComponent(url)}`,
+    (url: string) => `https://cors-anywhere.herokuapp.com/${url}`,
+    (url: string) => `https://thingproxy.freeboard.io/fetch/${url}`
+  ];
+
+  const handleImageLoad = () => {
+    setImageStatus('success');
+    console.log('✅ Изображение загружено:', imageSrc);
+  };
+
+  const handleImageError = () => {
+    console.log('❌ Ошибка загрузки изображения:', imageSrc);
+    
+    const nextProxyIndex = proxyIndex + 1;
+    if (nextProxyIndex < corsProxies.length) {
+      // Пробуем следующий прокси
+      const nextUrl = corsProxies[nextProxyIndex](src);
+      console.log(`🔄 Пробуем прокси ${nextProxyIndex + 1}:`, nextUrl);
+      setImageSrc(nextUrl);
+      setProxyIndex(nextProxyIndex);
+      setImageStatus('loading');
+    } else {
+      // Все прокси попробованы
+      console.log('🚫 Все прокси неудачны для:', src);
+      setImageStatus('error');
+    }
+  };
+
+  // Сброс состояния при изменении исходного URL
+  useEffect(() => {
+    setImageStatus('loading');
+    setProxyIndex(-1);
+    setImageSrc(src);
+  }, [src]);
+
+  if (imageStatus === 'error') {
+    return (
+      <div
+        style={{
+          width: width || '100%',
+          height: height || 80,
+          backgroundColor: '#f5f5f5',
+          border: '1px dashed #d9d9d9',
+          borderRadius: 6,
+          display: 'flex',
+          flexDirection: 'column',
+          alignItems: 'center',
+          justifyContent: 'center',
+          cursor: onClick ? 'pointer' : 'default',
+          padding: 8,
+          ...style
+        }}
+        onClick={onClick}
+      >
+        <PictureOutlined style={{ fontSize: 20, color: '#ccc', marginBottom: 4 }} />
+        <Text type="secondary" style={{ fontSize: 10, textAlign: 'center' }}>
+          Изображение недоступно<br />
+          <Button 
+            type="link" 
+            size="small" 
+            style={{ padding: 0, height: 'auto', fontSize: 10 }}
+            onClick={(e) => {
+              e.stopPropagation();
+              window.open(src, '_blank');
+            }}
+          >
+            Открыть оригинал
+          </Button>
+        </Text>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ position: 'relative', display: 'inline-block' }}>
+      {imageStatus === 'loading' && (
+        <div
+          style={{
+            position: 'absolute',
+            top: 0,
+            left: 0,
+            width: width || '100%',
+            height: height || 80,
+            backgroundColor: '#f5f5f5',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            borderRadius: 6,
+            zIndex: 1
+          }}
+        >
+          <Spin size="small" />
+          {proxyIndex >= 0 && (
+            <Text style={{ position: 'absolute', bottom: 2, fontSize: 8, color: '#999' }}>
+              Прокси {proxyIndex + 1}
+            </Text>
+          )}
+        </div>
+      )}
+      <img
+        src={imageSrc}
+        alt={alt}
+        style={{
+          width: width || '100%',
+          height: height || 80,
+          objectFit: 'cover',
+          borderRadius: 6,
+          cursor: onClick ? 'pointer' : 'default',
+          ...style
+        }}
+        onLoad={handleImageLoad}
+        onError={handleImageError}
+        onClick={onClick}
+      />
+    </div>
+  );
+}
+
+// Компонент для отображения медиафайлов
+function MediaGallery({ feedback }: { feedback: FeedbackData }) {
+  const [visible, setVisible] = useState(false);
+  const [previewOpen, setPreviewOpen] = useState(false);
+  const [previewImage, setPreviewImage] = useState('');
+  const [currentPhotoIndex, setCurrentPhotoIndex] = useState(0);
+  
+  const photos = feedback.photoLinks || [];
+  const video = feedback.video;
+  
+  // Отладка уже есть в loadFeedbacks - убираем дублирование
+  
+  const totalMediaCount = photos.length + (video ? 1 : 0);
+
+  if (totalMediaCount === 0) return null;
+
+  const handlePreview = (url: string) => {
+    setPreviewImage(url);
+    setPreviewOpen(true);
+  };
+
+  const handlePhotoNavigation = (direction: 'prev' | 'next') => {
+    if (direction === 'next') {
+      setCurrentPhotoIndex((prev) => (prev + 1) % photos.length);
+    } else {
+      setCurrentPhotoIndex((prev) => (prev - 1 + photos.length) % photos.length);
+    }
+  };
+
+  const handleThumbnailClick = (index: number) => {
+    setCurrentPhotoIndex(index);
+  };
+
+  // Обработка клавиш для навигации
+  useEffect(() => {
+    const handleKeyPress = (e: KeyboardEvent) => {
+      if (!visible || photos.length <= 1) return;
+      
+      if (e.key === 'ArrowLeft') {
+        handlePhotoNavigation('prev');
+      } else if (e.key === 'ArrowRight') {
+        handlePhotoNavigation('next');
+      } else if (e.key === 'Escape') {
+        setVisible(false);
+      }
+    };
+
+    if (visible) {
+      document.addEventListener('keydown', handleKeyPress);
+      return () => document.removeEventListener('keydown', handleKeyPress);
+    }
+  }, [visible, photos.length, currentPhotoIndex]);
+
+  return (
+    <div style={{ marginTop: 16 }}>
+      <Space direction="vertical" size="small" style={{ width: '100%' }}>
+        {/* Заголовок с количеством медиафайлов */}
+        <Space>
+          {photos.length > 0 && (
+            <Badge count={photos.length} color="blue">
+              <Tag icon={<PictureOutlined />} color="blue">
+                Фото
+              </Tag>
+            </Badge>
+          )}
+          {video && (
+            <Tag icon={<VideoCameraOutlined />} color="red">
+              Видео
+            </Tag>
+          )}
+        </Space>
+
+        {/* Превью фотографий */}
+        {photos.length > 0 && (
+          <div>
+            <Row gutter={[8, 8]}>
+              {photos.slice(0, 4).map((photo, index) => (
+                <Col key={index}>
+                  <SafeImage
+                    width={80}
+                    height={80}
+                    src={getPhotoUrl(photo)}
+                    alt={`Фото ${index + 1}`}
+                    onClick={() => {
+                      setCurrentPhotoIndex(index);
+                      setVisible(true);
+                    }}
+                  />
+                </Col>
+              ))}
+              {photos.length > 4 && (
+                <Col>
+                  <div
+                    style={{
+                      width: 80,
+                      height: 80,
+                      backgroundColor: '#f5f5f5',
+                      border: '1px dashed #d9d9d9',
+                      borderRadius: 6,
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center',
+                      cursor: 'pointer',
+                      fontSize: '12px',
+                      color: '#666'
+                    }}
+                    onClick={() => setVisible(true)}
+                  >
+                    +{photos.length - 4}
+                  </div>
+                </Col>
+              )}
+            </Row>
+          </div>
+        )}
+
+        {/* Превью видео */}
+        {video && (
+          <div>
+            <Row gutter={[8, 8]}>
+              <Col>
+                <div
+                  style={{
+                    position: 'relative',
+                    width: 120,
+                    height: 80,
+                    cursor: 'pointer',
+                    borderRadius: 6,
+                    overflow: 'hidden',
+                    backgroundColor: '#000'
+                  }}
+                  onClick={() => window.open(video.link, '_blank')}
+                >
+                  <SafeImage
+                    src={video.previewImage}
+                    alt="Превью видео"
+                    width={120}
+                    height={80}
+                    style={{ backgroundColor: '#000' }}
+                  />
+                  {/* Иконка воспроизведения */}
+                  <div
+                    style={{
+                      position: 'absolute',
+                      top: '50%',
+                      left: '50%',
+                      transform: 'translate(-50%, -50%)',
+                      fontSize: 24,
+                      color: 'rgba(255, 255, 255, 0.9)',
+                      textShadow: '0 0 4px rgba(0,0,0,0.8)',
+                      pointerEvents: 'none'
+                    }}
+                  >
+                    <PlayCircleOutlined />
+                  </div>
+                  {/* Длительность видео */}
+                  <div
+                    style={{
+                      position: 'absolute',
+                      bottom: 4,
+                      right: 4,
+                      backgroundColor: 'rgba(0, 0, 0, 0.8)',
+                      color: 'white',
+                      padding: '2px 6px',
+                      borderRadius: 4,
+                      fontSize: '10px',
+                      fontWeight: 'bold',
+                      pointerEvents: 'none'
+                    }}
+                  >
+                    {Math.floor(video.durationSec / 60)}:{(video.durationSec % 60).toString().padStart(2, '0')}
+                  </div>
+                  {/* Индикатор HLS видео */}
+                  <div
+                    style={{
+                      position: 'absolute',
+                      top: 4,
+                      left: 4,
+                      backgroundColor: 'rgba(220, 53, 69, 0.8)',
+                      color: 'white',
+                      padding: '1px 4px',
+                      borderRadius: 3,
+                      fontSize: '8px',
+                      fontWeight: 'bold',
+                      pointerEvents: 'none'
+                    }}
+                  >
+                    HLS
+                  </div>
+                </div>
+              </Col>
+            </Row>
+          </div>
+        )}
+
+        {/* Кнопка для просмотра всех медиафайлов */}
+        {totalMediaCount > 5 && (
+          <Button
+            type="link"
+            size="small"
+            icon={<EyeOutlined />}
+            onClick={() => {
+              setCurrentPhotoIndex(0);
+              setVisible(true);
+            }}
+            style={{ padding: 0 }}
+          >
+            Посмотреть все медиафайлы ({totalMediaCount})
+          </Button>
+        )}
+      </Space>
+
+      {/* Модальное окно для просмотра всех медиафайлов */}
+      <Modal
+        title={`Медиафайлы отзыва${photos.length > 0 ? ` - Фото ${currentPhotoIndex + 1} из ${photos.length}` : ''}`}
+        open={visible}
+        onCancel={() => setVisible(false)}
+        footer={null}
+        width="90vw"
+        style={{ maxWidth: '1200px' }}
+        centered
+      >
+        <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+          {photos.length > 0 && (
+            <div>
+              {/* Основная фотография с навигацией */}
+              <div style={{ position: 'relative', textAlign: 'center', marginBottom: 16 }}>
+                <div style={{
+                  width: '100%',
+                  height: '70vh',
+                  minHeight: '400px',
+                  maxHeight: '800px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  backgroundColor: '#000',
+                  borderRadius: 8,
+                  overflow: 'hidden',
+                  cursor: 'pointer',
+                  transition: 'all 0.3s ease',
+                  border: '2px solid transparent'
+                }}
+                onClick={() => window.open(getPhotoUrl(photos[currentPhotoIndex], true), '_blank')}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.borderColor = '#1890ff';
+                  e.currentTarget.style.boxShadow = '0 4px 20px rgba(24, 144, 255, 0.3)';
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.borderColor = 'transparent';
+                  e.currentTarget.style.boxShadow = 'none';
+                }}
+                >
+                  <SafeImage
+                    src={getPhotoUrl(photos[currentPhotoIndex], true)}
+                    alt={`Фото ${currentPhotoIndex + 1}`}
+                    style={{ 
+                      width: '100%', 
+                      height: '100%',
+                      objectFit: 'contain',
+                      backgroundColor: 'transparent'
+                    }}
+                  />
+                </div>
+                
+                                 {/* Кнопки навигации */}
+                 {photos.length > 1 && (
+                   <>
+                     <Tooltip title="Предыдущая фотография (←)" placement="left">
+                       <Button
+                         shape="circle"
+                         icon={<LeftOutlined />}
+                         style={{
+                           position: 'absolute',
+                           left: 16,
+                           top: '50%',
+                           transform: 'translateY(-50%)',
+                           backgroundColor: 'rgba(0, 0, 0, 0.7)',
+                           borderColor: 'rgba(255, 255, 255, 0.3)',
+                           color: 'white',
+                           fontSize: '16px',
+                           boxShadow: '0 2px 8px rgba(0,0,0,0.3)'
+                         }}
+                         onClick={() => handlePhotoNavigation('prev')}
+                       />
+                     </Tooltip>
+                     <Tooltip title="Следующая фотография (→)" placement="right">
+                       <Button
+                         shape="circle"
+                         icon={<RightOutlined />}
+                         style={{
+                           position: 'absolute',
+                           right: 16,
+                           top: '50%',
+                           transform: 'translateY(-50%)',
+                           backgroundColor: 'rgba(0, 0, 0, 0.7)',
+                           borderColor: 'rgba(255, 255, 255, 0.3)',
+                           color: 'white',
+                           fontSize: '16px',
+                           boxShadow: '0 2px 8px rgba(0,0,0,0.3)'
+                         }}
+                         onClick={() => handlePhotoNavigation('next')}
+                       />
+                     </Tooltip>
+                   </>
+                 )}
+                
+                                 {/* Индикаторы */}
+                 <div style={{
+                   position: 'absolute',
+                   bottom: 16,
+                   left: '50%',
+                   transform: 'translateX(-50%)',
+                   display: 'flex',
+                   gap: '8px',
+                   alignItems: 'center'
+                 }}>
+                   {photos.length > 1 && (
+                     <div style={{
+                       backgroundColor: 'rgba(0, 0, 0, 0.7)',
+                       color: 'white',
+                       padding: '4px 12px',
+                       borderRadius: 16,
+                       fontSize: '12px'
+                     }}>
+                       {currentPhotoIndex + 1} / {photos.length}
+                     </div>
+                   )}
+                   <div style={{
+                     backgroundColor: 'rgba(0, 0, 0, 0.7)',
+                     color: 'white',
+                     padding: '4px 12px',
+                     borderRadius: 16,
+                     fontSize: '10px',
+                     opacity: 0.8
+                   }}>
+                     Клик для полного размера
+                   </div>
+                 </div>
+              </div>
+
+              {/* Миниатюры для быстрого переключения */}
+              {photos.length > 1 && (
+                <div>
+                  <Typography.Title level={5} style={{ marginBottom: 8 }}>
+                    <PictureOutlined /> Все фотографии
+                  </Typography.Title>
+                  <Row gutter={[8, 8]} justify="center">
+                    {photos.map((photo, index) => (
+                      <Col key={index}>
+                        <div
+                          style={{
+                            border: index === currentPhotoIndex ? '3px solid #1890ff' : '2px solid transparent',
+                            borderRadius: 8,
+                            overflow: 'hidden',
+                            cursor: 'pointer',
+                            transition: 'all 0.2s'
+                          }}
+                          onClick={() => handleThumbnailClick(index)}
+                        >
+                          <SafeImage
+                            src={getPhotoUrl(photo)}
+                            alt={`Миниатюра ${index + 1}`}
+                            width={80}
+                            height={80}
+                            style={{ 
+                              opacity: index === currentPhotoIndex ? 1 : 0.7,
+                              transition: 'opacity 0.2s'
+                            }}
+                          />
+                        </div>
+                      </Col>
+                    ))}
+                  </Row>
+                </div>
+              )}
+            </div>
+          )}
+
+          {video && (
+            <div>
+              <Typography.Title level={5}>
+                <VideoCameraOutlined /> Видео ({Math.floor(video.durationSec / 60)}:{(video.durationSec % 60).toString().padStart(2, '0')})
+              </Typography.Title>
+              <Row gutter={[12, 12]}>
+                <Col xs={12} sm={8} md={6}>
+                  <div
+                    style={{
+                      position: 'relative',
+                      width: '100%',
+                      height: 120,
+                      cursor: 'pointer',
+                      borderRadius: 6,
+                      overflow: 'hidden',
+                      backgroundColor: '#000'
+                    }}
+                    onClick={() => window.open(video.link, '_blank')}
+                  >
+                    <SafeImage
+                      src={video.previewImage}
+                      alt="Превью видео"
+                      height={120}
+                      style={{ width: '100%', backgroundColor: '#000' }}
+                    />
+                    <div
+                      style={{
+                        position: 'absolute',
+                        top: '50%',
+                        left: '50%',
+                        transform: 'translate(-50%, -50%)',
+                        fontSize: 32,
+                        color: 'rgba(255, 255, 255, 0.9)',
+                        textShadow: '0 0 6px rgba(0,0,0,0.8)',
+                        pointerEvents: 'none'
+                      }}
+                    >
+                      <PlayCircleOutlined />
+                    </div>
+                    {/* Длительность видео */}
+                    <div
+                      style={{
+                        position: 'absolute',
+                        bottom: 8,
+                        right: 8,
+                        backgroundColor: 'rgba(0, 0, 0, 0.8)',
+                        color: 'white',
+                        padding: '4px 8px',
+                        borderRadius: 4,
+                        fontSize: '12px',
+                        fontWeight: 'bold',
+                        pointerEvents: 'none'
+                      }}
+                    >
+                      {Math.floor(video.durationSec / 60)}:{(video.durationSec % 60).toString().padStart(2, '0')}
+                    </div>
+                    {/* HLS индикатор */}
+                    <div
+                      style={{
+                        position: 'absolute',
+                        top: 8,
+                        left: 8,
+                        backgroundColor: 'rgba(220, 53, 69, 0.9)',
+                        color: 'white',
+                        padding: '2px 6px',
+                        borderRadius: 3,
+                        fontSize: '10px',
+                        fontWeight: 'bold',
+                        pointerEvents: 'none'
+                      }}
+                    >
+                      HLS
+                    </div>
+                  </div>
+                </Col>
+              </Row>
+            </div>
+          )}
+        </Space>
+      </Modal>
+
+      {/* Скрытое превью для фотографий */}
+      <Image
+        style={{ display: 'none' }}
+        src={previewImage}
+        preview={{
+          visible: previewOpen,
+          onVisibleChange: (vis) => setPreviewOpen(vis),
+        }}
+      />
+    </div>
+  );
+}
+
 // Компонент отзыва
 function FeedbackCard({ feedback, onReply, aiReply, onGenerateReply, isGenerating }: FeedbackCardProps) {
   const [replyText, setReplyText] = useState(aiReply || '');
@@ -221,6 +878,12 @@ function FeedbackCard({ feedback, onReply, aiReply, onGenerateReply, isGeneratin
     }
   };
 
+  // Проверяем есть ли медиафайлы
+  const hasMedia = !!(
+    feedback.photoLinks?.length || 
+    feedback.video
+  );
+
   return (
     <Card 
       style={{ marginBottom: 16 }}
@@ -230,6 +893,13 @@ function FeedbackCard({ feedback, onReply, aiReply, onGenerateReply, isGeneratin
             <Space direction="vertical" size={0}>
               <Title level={4} style={{ margin: 0 }}>
                 {feedback.productDetails?.productName || 'Товар'}
+                {hasMedia && (
+                  <Space style={{ marginLeft: 8 }}>
+                    <Tag icon={<PictureOutlined />} color="blue">
+                      С медиа
+                    </Tag>
+                  </Space>
+                )}
               </Title>
               <Text type="secondary">
                 {feedback.productDetails?.brandName} • Артикул: {feedback.productDetails?.supplierArticle}
@@ -261,6 +931,9 @@ function FeedbackCard({ feedback, onReply, aiReply, onGenerateReply, isGeneratin
               <Tag color="red">Недостатки:</Tag> {feedback.cons}
             </Paragraph>
           )}
+          
+          {/* Отображение медиафайлов */}
+          <MediaGallery feedback={feedback} />
         </div>
 
         {feedback.answer ? (
@@ -340,7 +1013,8 @@ export default function WildberriesReviewsAI() {
   const [openaiKey, setOpenaiKey] = useState(import.meta.env.VITE_OPENAI_API_KEY || '');
   const [isConnected, setIsConnected] = useState(false);
   const [activeTab, setActiveTab] = useState('unanswered');
-  const [feedbacks, setFeedbacks] = useState<FeedbackData[]>([]);
+  const [allFeedbacks, setAllFeedbacks] = useState<FeedbackData[]>([]); // Все загруженные отзывы
+  const [filteredFeedbacks, setFilteredFeedbacks] = useState<FeedbackData[]>([]); // Отфильтрованные отзывы
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [stats, setStats] = useState<StatsData | null>(null);
@@ -348,9 +1022,34 @@ export default function WildberriesReviewsAI() {
   const [generatingFor, setGeneratingFor] = useState<string | null>(null);
   const [aiInstructions, setAiInstructions] = useState('');
   const [showSettings, setShowSettings] = useState(false);
+  
+  // Новые состояния для фильтрации
+  const [selectedRatings, setSelectedRatings] = useState<number[]>([1, 2, 3, 4, 5]); // По умолчанию все оценки
+  const [showFilters, setShowFilters] = useState(false);
+  const [hasMedia, setHasMedia] = useState<boolean | null>(null); // null = все, true = только с медиа, false = только без медиа
 
   const wbApi = React.useRef<WildberriesAPI | null>(null);
   const openaiApi = React.useRef<OpenAIAPI | null>(null);
+
+  // Функция фильтрации отзывов
+  const filterFeedbacks = (feedbacks: FeedbackData[]) => {
+    return feedbacks.filter(feedback => {
+      // Фильтр по рейтингу
+      const ratingMatch = selectedRatings.includes(feedback.productValuation || 0);
+      
+      // Фильтр по медиафайлам
+      const feedbackHasMedia = !!(feedback.photoLinks?.length || feedback.video);
+      const mediaMatch = hasMedia === null || feedbackHasMedia === hasMedia;
+      
+      return ratingMatch && mediaMatch;
+    });
+  };
+
+  // Применение фильтров при изменении настроек
+  useEffect(() => {
+    const filtered = filterFeedbacks(allFeedbacks);
+    setFilteredFeedbacks(filtered);
+  }, [allFeedbacks, selectedRatings, hasMedia]);
 
   const connect = async () => {
     if (!wbToken || !openaiKey) {
@@ -387,12 +1086,62 @@ export default function WildberriesReviewsAI() {
     setError('');
 
     const isAnswered = activeTab === 'answered';
-    const result = await wbApi.current.getFeedbacks(isAnswered);
+    const result = await wbApi.current.getFeedbacks(isAnswered, 100); // Оптимальное количество
 
     if (result.error) {
       setError(`Ошибка загрузки: ${result.errorText}`);
+      setAllFeedbacks([]);
     } else {
-      setFeedbacks(result.data?.feedbacks || []);
+      const feedbacks = result.data?.feedbacks || [];
+      setAllFeedbacks(feedbacks);
+      
+      // Детальное логирование медиафайлов для отладки
+      const withMedia = feedbacks.filter(f => f.photoLinks?.length || f.video);
+      const photoCount = feedbacks.reduce((sum, f) => sum + (f.photoLinks?.length || 0), 0);
+      const videoCount = feedbacks.filter(f => f.video).length;
+      
+      console.log(`📊 Статистика медиафайлов:`, {
+        totalFeedbacks: feedbacks.length,
+        withMedia: withMedia.length,
+        photoCount,
+        videoCount
+      });
+      
+      // Детальная информация о первых медиафайлах
+      if (withMedia.length > 0) {
+        console.log(`🔍 Примеры медиафайлов:`, withMedia.slice(0, 5).map(f => ({
+          feedbackId: f.id,
+          userName: f.userName,
+          photos: {
+            count: f.photoLinks?.length || 0,
+            urls: f.photoLinks?.slice(0, 3).map(photo => ({
+              miniSize: photo.miniSize,
+              fullSize: photo.fullSize
+            })) // Первые 3 URL
+          },
+          video: f.video ? {
+            hasVideo: true,
+            previewImage: f.video.previewImage,
+            videoLink: f.video.link,
+            duration: f.video.durationSec
+          } : null
+        })));
+        
+        // Проверяем домены изображений
+        const photoUrls = feedbacks.flatMap(f => 
+          (f.photoLinks || []).map(photo => getPhotoUrl(photo, true))
+        );
+        const domains = [...new Set(photoUrls.map(url => {
+          try {
+            return new URL(url).hostname;
+          } catch {
+            return 'invalid-url';
+          }
+        }))];
+        console.log(`🌐 Домены изображений:`, domains);
+      } else {
+        console.log(`ℹ️ Медиафайлы в отзывах не найдены`);
+      }
     }
 
     setLoading(false);
@@ -419,7 +1168,7 @@ export default function WildberriesReviewsAI() {
 
     if (result.success) {
       // Удаляем из списка и очищаем сгенерированный ответ
-      setFeedbacks(prev => prev.filter(f => f.id !== feedbackId));
+      setAllFeedbacks(prev => prev.filter(f => f.id !== feedbackId));
       setAiReplies(prev => {
         const newReplies = { ...prev };
         delete newReplies[feedbackId];
@@ -438,6 +1187,105 @@ export default function WildberriesReviewsAI() {
     }
 
     setLoading(false);
+  };
+
+  // Обработчики фильтров
+  const handleRatingChange = (rating: number, checked: boolean) => {
+    if (checked) {
+      setSelectedRatings(prev => [...prev, rating].sort());
+    } else {
+      setSelectedRatings(prev => prev.filter(r => r !== rating));
+    }
+  };
+
+  const handleSelectAllRatings = () => {
+    setSelectedRatings([1, 2, 3, 4, 5]);
+  };
+
+  const handleClearAllRatings = () => {
+    setSelectedRatings([]);
+  };
+
+  // Компонент фильтра
+  const FilterDropdown = () => {
+    const ratingCounts = [1, 2, 3, 4, 5].map(rating => ({
+      rating,
+      count: allFeedbacks.filter(f => f.productValuation === rating).length
+    }));
+
+    const mediaCounts = {
+      withMedia: allFeedbacks.filter(f => !!(f.photoLinks?.length || f.video)).length,
+      withoutMedia: allFeedbacks.filter(f => !(f.photoLinks?.length || f.video)).length
+    };
+
+    return (
+      <div style={{ padding: 16, width: 300 }}>
+        <Space direction="vertical" size="middle" style={{ width: '100%' }}>
+          {/* Фильтр по рейтингу */}
+          <div>
+            <div style={{ marginBottom: 8, fontWeight: 'bold' }}>
+              <StarOutlined /> Фильтр по оценкам
+            </div>
+            <Space direction="vertical" size="small" style={{ width: '100%' }}>
+              {ratingCounts.map(({ rating, count }) => (
+                <div key={rating} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                  <Checkbox
+                    checked={selectedRatings.includes(rating)}
+                    onChange={(e) => handleRatingChange(rating, e.target.checked)}
+                  >
+                    <Rate disabled value={rating} style={{ fontSize: 12 }} />
+                  </Checkbox>
+                  <Tag color={count > 0 ? 'blue' : 'default'}>{count}</Tag>
+                </div>
+              ))}
+              <Divider style={{ margin: '8px 0' }} />
+              <Space>
+                <Button size="small" onClick={handleSelectAllRatings}>Все</Button>
+                <Button size="small" onClick={handleClearAllRatings}>Очистить</Button>
+              </Space>
+            </Space>
+          </div>
+
+          <Divider style={{ margin: 0 }} />
+
+          {/* Фильтр по медиафайлам */}
+          <div>
+            <div style={{ marginBottom: 8, fontWeight: 'bold' }}>
+              <PictureOutlined /> Фильтр по медиафайлам
+            </div>
+            <Space direction="vertical" size="small" style={{ width: '100%' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <Checkbox
+                  checked={hasMedia === null}
+                  onChange={() => setHasMedia(null)}
+                >
+                  Все отзывы
+                </Checkbox>
+                <Tag color="default">{allFeedbacks.length}</Tag>
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <Checkbox
+                  checked={hasMedia === true}
+                  onChange={() => setHasMedia(true)}
+                >
+                  С медиафайлами
+                </Checkbox>
+                <Tag color={mediaCounts.withMedia > 0 ? 'blue' : 'default'}>{mediaCounts.withMedia}</Tag>
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <Checkbox
+                  checked={hasMedia === false}
+                  onChange={() => setHasMedia(false)}
+                >
+                  Без медиафайлов
+                </Checkbox>
+                <Tag color={mediaCounts.withoutMedia > 0 ? 'blue' : 'default'}>{mediaCounts.withoutMedia}</Tag>
+              </div>
+            </Space>
+          </div>
+        </Space>
+      </div>
+    );
   };
 
   // Автоматическое подключение если токены есть в .env
@@ -560,6 +1408,8 @@ export default function WildberriesReviewsAI() {
     }
   ];
 
+  const activeFiltersCount = (selectedRatings.length !== 5 ? 1 : 0) + (hasMedia !== null ? 1 : 0);
+
   return (
     <ConfigProvider
       theme={{
@@ -579,7 +1429,8 @@ export default function WildberriesReviewsAI() {
                 </Title>
                 {stats && (
                   <Text type="secondary">
-                    Без ответа: {stats.countUnanswered} • Рейтинг: {stats.valuation}
+                    Без ответа: {stats.countUnanswered} • Рейтинг: {stats.valuation} • 
+                    Загружено: {allFeedbacks.length} • Показано: {filteredFeedbacks.length}
                   </Text>
                 )}
               </Space>
@@ -587,6 +1438,18 @@ export default function WildberriesReviewsAI() {
             
             <Col>
               <Space>
+                <Dropdown
+                  popupRender={() => <div>{FilterDropdown()}</div>}
+                  trigger={['click']}
+                  placement="bottomRight"
+                >
+                  <Button icon={<FilterOutlined />}>
+                    Фильтры
+                    {activeFiltersCount > 0 && (
+                      <Badge count={activeFiltersCount} size="small" style={{ marginLeft: 8 }} />
+                    )}
+                  </Button>
+                </Dropdown>
                 <Button
                   icon={<SettingOutlined />}
                   onClick={() => setShowSettings(!showSettings)}
@@ -655,23 +1518,52 @@ export default function WildberriesReviewsAI() {
               />
             )}
 
+            {/* Информация о медиафайлах */}
+            {filteredFeedbacks.some(f => f.photoLinks?.length || f.video) && (
+              <Alert
+                message="📸 Галерея медиафайлов"
+                description={
+                  <div>
+                    <p style={{ margin: 0, marginBottom: 8 }}>
+                      <strong>🖼️ Навигация по фотографиям:</strong> Кликните на любую фотографию для просмотра в полном размере с возможностью листания.
+                    </p>
+                    <ul style={{ margin: 0, paddingLeft: 16 }}>
+                      <li><strong>Управление:</strong> Стрелки ← → на клавиатуре или кнопки в галерее</li>
+                      <li><strong>Миниатюры:</strong> Быстрое переключение между фотографиями снизу</li>
+                      <li><strong>Полное качество:</strong> Клик по большой фотографии откроет оригинал в новой вкладке</li>
+                      <li><strong>Видео:</strong> HLS (.m3u8) файлы лучше открывать в новой вкладке</li>
+                      <li><strong>Прокси:</strong> Изображения загружаются через несколько серверов для обхода CORS</li>
+                    </ul>
+                  </div>
+                }
+                type="success"
+                showIcon
+                closable
+                style={{ marginBottom: 16 }}
+              />
+            )}
+
             {/* Список отзывов */}
-            {loading && !feedbacks.length ? (
+            {loading && !filteredFeedbacks.length ? (
               <div style={{ textAlign: 'center', padding: '50px 0' }}>
                 <Spin size="large" />
                 <div style={{ marginTop: 16 }}>
                   <Text>Загрузка отзывов...</Text>
                 </div>
               </div>
-            ) : feedbacks.length === 0 ? (
+            ) : filteredFeedbacks.length === 0 ? (
               <Empty
                 image={Empty.PRESENTED_IMAGE_SIMPLE}
-                description="Нет отзывов для отображения"
+                description={
+                  allFeedbacks.length === 0 
+                    ? "Нет отзывов для отображения"
+                    : "Нет отзывов, соответствующих выбранным фильтрам"
+                }
                 style={{ padding: '50px 0' }}
               />
             ) : (
               <div>
-                {feedbacks.map(feedback => (
+                {filteredFeedbacks.map(feedback => (
                   <FeedbackCard
                     key={feedback.id}
                     feedback={feedback}
