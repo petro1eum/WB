@@ -19,12 +19,9 @@ import {
   Drawer,
   Form,
   ConfigProvider,
-  Image,
   Modal,
   Badge,
   Checkbox,
-  Dropdown,
-  Menu,
   Tooltip,
   Pagination,
   Popover
@@ -32,23 +29,19 @@ import {
 import { 
   SendOutlined, 
   ReloadOutlined, 
-  MessageOutlined, 
   SettingOutlined, 
   RobotOutlined,
   EditOutlined,
   CheckOutlined,
-  CloseOutlined,
   PictureOutlined,
   VideoCameraOutlined,
   PlayCircleOutlined,
   EyeOutlined,
   FilterOutlined,
   StarOutlined,
-  StarFilled,
   LeftOutlined,
   RightOutlined,
   UpOutlined,
-  DownOutlined,
   SearchOutlined
 } from '@ant-design/icons';
 
@@ -525,8 +518,6 @@ function SafeImage({ src, alt, style, width, height, onClick }: {
 // Компонент для отображения медиафайлов
 function MediaGallery({ feedback }: { feedback: FeedbackData }) {
   const [visible, setVisible] = useState(false);
-  const [previewOpen, setPreviewOpen] = useState(false);
-  const [previewImage, setPreviewImage] = useState('');
   const [currentPhotoIndex, setCurrentPhotoIndex] = useState(0);
   
   const photos = feedback.photoLinks || [];
@@ -538,10 +529,7 @@ function MediaGallery({ feedback }: { feedback: FeedbackData }) {
 
   if (totalMediaCount === 0) return null;
 
-  const handlePreview = (url: string) => {
-    setPreviewImage(url);
-    setPreviewOpen(true);
-  };
+
 
   const handlePhotoNavigation = (direction: 'prev' | 'next') => {
     if (direction === 'next') {
@@ -981,15 +969,7 @@ function MediaGallery({ feedback }: { feedback: FeedbackData }) {
         </Space>
       </Modal>
 
-      {/* Скрытое превью для фотографий */}
-      <Image
-        style={{ display: 'none' }}
-        src={previewImage}
-        preview={{
-          visible: previewOpen,
-          onVisibleChange: (vis) => setPreviewOpen(vis),
-        }}
-      />
+
     </div>
   );
 }
@@ -1317,7 +1297,6 @@ export default function WildberriesReviewsAI() {
   
   // Новые состояния для фильтрации
   const [selectedRatings, setSelectedRatings] = useState<number[]>([1, 2, 3, 4, 5]); // По умолчанию все оценки
-  const [showFilters, setShowFilters] = useState(false);
   const [hasMedia, setHasMedia] = useState<boolean | null>(null); // null = все, true = только с медиа, false = только без медиа
   const [selectedBables, setSelectedBables] = useState<string[]>([]); // Фильтр по тегам
 
