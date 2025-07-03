@@ -25,7 +25,9 @@ import {
   Checkbox,
   Dropdown,
   Menu,
-  Tooltip
+  Tooltip,
+  Pagination,
+  Popover
 } from 'antd';
 import { 
   SendOutlined, 
@@ -44,7 +46,9 @@ import {
   StarOutlined,
   StarFilled,
   LeftOutlined,
-  RightOutlined
+  RightOutlined,
+  UpOutlined,
+  DownOutlined
 } from '@ant-design/icons';
 
 const { Header, Content } = Layout;
@@ -1092,6 +1096,16 @@ export default function WildberriesReviewsAI() {
   const [showFilters, setShowFilters] = useState(false);
   const [hasMedia, setHasMedia] = useState<boolean | null>(null); // null = все, true = только с медиа, false = только без медиа
 
+  // Состояния для пагинации
+  const [currentPage, setCurrentPage] = useState(1);
+  const [pageSize, setPageSize] = useState(10);
+  const [showBackToTop, setShowBackToTop] = useState(false);
+
+  // Состояния для подгрузки с сервера
+  const [loadedCount, setLoadedCount] = useState(0);
+  const [hasMoreFeedbacks, setHasMoreFeedbacks] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
+
   const wbApi = React.useRef<WildberriesAPI | null>(null);
   const openaiApi = React.useRef<OpenAIAPI | null>(null);
 
@@ -1113,7 +1127,14 @@ export default function WildberriesReviewsAI() {
   useEffect(() => {
     const filtered = filterFeedbacks(allFeedbacks);
     setFilteredFeedbacks(filtered);
+    setCurrentPage(1); // Сброс на первую страницу при изменении фильтров
   }, [allFeedbacks, selectedRatings, hasMedia]);
+
+  // Пагинация отфильтрованных отзывов
+  const paginatedFeedbacks = filteredFeedbacks.slice(
+    (currentPage - 1) * pageSize,
+    currentPage * pageSize
+  );
 
   const connect = async () => {
     if (!wbToken || !openaiKey) {
@@ -1140,24 +1161,55 @@ export default function WildberriesReviewsAI() {
     setLoading(false);
     
     // Загружаем отзывы
-    await loadFeedbacks();
+    await loadFeedbacks(false);
   };
 
-  const loadFeedbacks = async () => {
+  const loadFeedbacks = async (isLoadMore = false) => {
     if (!wbApi.current) return;
 
-    setLoading(true);
-    setError('');
+    if (isLoadMore) {
+      setLoadingMore(true);
+    } else {
+      setLoading(true);
+      setError('');
+      setLoadedCount(0);
+      setHasMoreFeedbacks(true);
+    }
 
     const isAnswered = activeTab === 'answered';
-    const result = await wbApi.current.getFeedbacks(isAnswered, 100); // Оптимальное количество
+    const skip = isLoadMore ? loadedCount : 0;
+    const take = 100;
+    
+    const result = await wbApi.current.getFeedbacks(isAnswered, take, skip);
 
     if (result.error) {
       setError(`Ошибка загрузки: ${result.errorText}`);
-      setAllFeedbacks([]);
+      if (!isLoadMore) {
+        setAllFeedbacks([]);
+      }
     } else {
       const feedbacks = result.data?.feedbacks || [];
-      setAllFeedbacks(feedbacks);
+      
+      if (isLoadMore) {
+        // Добавляем к существующим
+        setAllFeedbacks(prev => [...prev, ...feedbacks]);
+      } else {
+        // Заменяем все
+        setAllFeedbacks(feedbacks);
+        
+        // Прокрутка к началу при загрузке новых отзывов
+        if (feedbacks.length > 0) {
+          setTimeout(() => window.scrollTo({ top: 0, behavior: 'smooth' }), 100);
+        }
+      }
+      
+      // Обновляем счетчики
+      setLoadedCount(prev => isLoadMore ? prev + feedbacks.length : feedbacks.length);
+      
+      // Проверяем есть ли еще отзывы (если получили меньше чем запрашивали)
+      if (feedbacks.length < take) {
+        setHasMoreFeedbacks(false);
+      }
       
       // Детальное логирование медиафайлов для отладки
       const withMedia = feedbacks.filter(f => f.photoLinks?.length || f.video);
@@ -1234,8 +1286,16 @@ export default function WildberriesReviewsAI() {
       }
     }
 
-    setLoading(false);
+    if (isLoadMore) {
+      setLoadingMore(false);
+    } else {
+      setLoading(false);
+    }
   };
+
+  // Функции для кнопок
+  const handleRefreshFeedbacks = () => loadFeedbacks(false);
+  const handleLoadMoreFeedbacks = () => loadFeedbacks(true);
 
   const generateReply = async (feedback: FeedbackData) => {
     if (!openaiApi.current) return;
@@ -1309,16 +1369,46 @@ export default function WildberriesReviewsAI() {
     };
 
     return (
-      <div style={{ padding: 16, width: 300 }}>
+      <div style={{ 
+        padding: 16, 
+        width: 320,
+        backgroundColor: '#fff',
+        borderRadius: 8,
+        boxShadow: '0 4px 12px rgba(0, 0, 0, 0.15)',
+        border: '1px solid #e8e8e8'
+      }}>
         <Space direction="vertical" size="middle" style={{ width: '100%' }}>
           {/* Фильтр по рейтингу */}
           <div>
-            <div style={{ marginBottom: 8, fontWeight: 'bold' }}>
+            <div style={{ 
+              marginBottom: 8, 
+              fontWeight: 'bold',
+              color: '#1890ff',
+              fontSize: '14px'
+            }}>
               <StarOutlined /> Фильтр по оценкам
             </div>
             <Space direction="vertical" size="small" style={{ width: '100%' }}>
               {ratingCounts.map(({ rating, count }) => (
-                <div key={rating} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <div 
+                  key={rating} 
+                  style={{ 
+                    display: 'flex', 
+                    justifyContent: 'space-between', 
+                    alignItems: 'center',
+                    padding: '4px 8px',
+                    borderRadius: 4,
+                    transition: 'background-color 0.2s',
+                    cursor: 'pointer'
+                  }}
+                  onMouseEnter={(e) => {
+                    e.currentTarget.style.backgroundColor = '#f5f5f5';
+                  }}
+                  onMouseLeave={(e) => {
+                    e.currentTarget.style.backgroundColor = 'transparent';
+                  }}
+                  onClick={() => handleRatingChange(rating, !selectedRatings.includes(rating))}
+                >
                   <Checkbox
                     checked={selectedRatings.includes(rating)}
                     onChange={(e) => handleRatingChange(rating, e.target.checked)}
@@ -1330,8 +1420,21 @@ export default function WildberriesReviewsAI() {
               ))}
               <Divider style={{ margin: '8px 0' }} />
               <Space>
-                <Button size="small" onClick={handleSelectAllRatings}>Все</Button>
-                <Button size="small" onClick={handleClearAllRatings}>Очистить</Button>
+                <Button 
+                  size="small" 
+                  type="primary" 
+                  ghost 
+                  onClick={handleSelectAllRatings}
+                >
+                  Все
+                </Button>
+                <Button 
+                  size="small" 
+                  type="default" 
+                  onClick={handleClearAllRatings}
+                >
+                  Очистить
+                </Button>
               </Space>
             </Space>
           </div>
@@ -1340,11 +1443,33 @@ export default function WildberriesReviewsAI() {
 
           {/* Фильтр по медиафайлам */}
           <div>
-            <div style={{ marginBottom: 8, fontWeight: 'bold' }}>
+            <div style={{ 
+              marginBottom: 8, 
+              fontWeight: 'bold',
+              color: '#1890ff',
+              fontSize: '14px'
+            }}>
               <PictureOutlined /> Фильтр по медиафайлам
             </div>
             <Space direction="vertical" size="small" style={{ width: '100%' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <div 
+                style={{ 
+                  display: 'flex', 
+                  justifyContent: 'space-between', 
+                  alignItems: 'center',
+                  padding: '4px 8px',
+                  borderRadius: 4,
+                  transition: 'background-color 0.2s',
+                  cursor: 'pointer'
+                }}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.backgroundColor = '#f5f5f5';
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.backgroundColor = 'transparent';
+                }}
+                onClick={() => setHasMedia(null)}
+              >
                 <Checkbox
                   checked={hasMedia === null}
                   onChange={() => setHasMedia(null)}
@@ -1353,7 +1478,24 @@ export default function WildberriesReviewsAI() {
                 </Checkbox>
                 <Tag color="default">{allFeedbacks.length}</Tag>
               </div>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <div 
+                style={{ 
+                  display: 'flex', 
+                  justifyContent: 'space-between', 
+                  alignItems: 'center',
+                  padding: '4px 8px',
+                  borderRadius: 4,
+                  transition: 'background-color 0.2s',
+                  cursor: 'pointer'
+                }}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.backgroundColor = '#f5f5f5';
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.backgroundColor = 'transparent';
+                }}
+                onClick={() => setHasMedia(true)}
+              >
                 <Checkbox
                   checked={hasMedia === true}
                   onChange={() => setHasMedia(true)}
@@ -1362,7 +1504,24 @@ export default function WildberriesReviewsAI() {
                 </Checkbox>
                 <Tag color={mediaCounts.withMedia > 0 ? 'blue' : 'default'}>{mediaCounts.withMedia}</Tag>
               </div>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <div 
+                style={{ 
+                  display: 'flex', 
+                  justifyContent: 'space-between', 
+                  alignItems: 'center',
+                  padding: '4px 8px',
+                  borderRadius: 4,
+                  transition: 'background-color 0.2s',
+                  cursor: 'pointer'
+                }}
+                onMouseEnter={(e) => {
+                  e.currentTarget.style.backgroundColor = '#f5f5f5';
+                }}
+                onMouseLeave={(e) => {
+                  e.currentTarget.style.backgroundColor = 'transparent';
+                }}
+                onClick={() => setHasMedia(false)}
+              >
                 <Checkbox
                   checked={hasMedia === false}
                   onChange={() => setHasMedia(false)}
@@ -1391,9 +1550,19 @@ export default function WildberriesReviewsAI() {
 
   useEffect(() => {
     if (isConnected) {
-      loadFeedbacks();
+      handleRefreshFeedbacks();
     }
   }, [activeTab, isConnected]);
+
+  // Обработчик скролла для кнопки "Наверх"
+  useEffect(() => {
+    const handleScroll = () => {
+      setShowBackToTop(window.scrollY > 300);
+    };
+
+    window.addEventListener('scroll', handleScroll);
+    return () => window.removeEventListener('scroll', handleScroll);
+  }, []);
 
   if (!isConnected) {
     return (
@@ -1479,11 +1648,32 @@ export default function WildberriesReviewsAI() {
                 />
               </Space>
             </Card>
-          </Content>
-        </Layout>
-      </ConfigProvider>
-    );
-  }
+                  </Content>
+        
+        {/* Кнопка "Наверх" */}
+        {showBackToTop && (
+          <Tooltip title="Наверх" placement="left">
+            <Button
+              type="primary"
+              shape="circle"
+              size="large"
+              icon={<UpOutlined />}
+              style={{
+                position: 'fixed',
+                right: 24,
+                bottom: 24,
+                zIndex: 1000,
+                boxShadow: '0 4px 12px rgba(24, 144, 255, 0.3)',
+                transition: 'all 0.3s ease'
+              }}
+              onClick={() => window.scrollTo({ top: 0, behavior: 'smooth' })}
+            />
+          </Tooltip>
+        )}
+      </Layout>
+    </ConfigProvider>
+  );
+}
 
   const tabItems = [
     {
@@ -1520,9 +1710,12 @@ export default function WildberriesReviewsAI() {
                 {stats && (
                   <Text type="secondary">
                     Без ответа: {stats.countUnanswered} • Рейтинг: {stats.valuation} • 
-                    Загружено: {allFeedbacks.length} • Показано: {filteredFeedbacks.length}
+                    Загружено: {loadedCount} • Показано: {filteredFeedbacks.length}
                     {allFeedbacks.some(f => f.answer) && (
                       <span> • Отвечено: {allFeedbacks.filter(f => f.answer).length}</span>
+                    )}
+                    {hasMoreFeedbacks && (
+                      <span> • <span style={{ color: '#1890ff' }}>Есть еще ⬇</span></span>
                     )}
                   </Text>
                 )}
@@ -1531,10 +1724,16 @@ export default function WildberriesReviewsAI() {
             
             <Col>
               <Space>
-                <Dropdown
-                  popupRender={() => <div>{FilterDropdown()}</div>}
-                  trigger={['click']}
+                <Popover
+                  content={FilterDropdown()}
+                  trigger="click"
                   placement="bottomRight"
+                  overlayStyle={{
+                    padding: 0,
+                    borderRadius: 8,
+                    overflow: 'hidden'
+                  }}
+                  getPopupContainer={(triggerNode) => triggerNode.parentElement || document.body}
                 >
                   <Button icon={<FilterOutlined />}>
                     Фильтры
@@ -1542,7 +1741,7 @@ export default function WildberriesReviewsAI() {
                       <Badge count={activeFiltersCount} size="small" style={{ marginLeft: 8 }} />
                     )}
                   </Button>
-                </Dropdown>
+                </Popover>
                 <Button
                   icon={<SettingOutlined />}
                   onClick={() => setShowSettings(!showSettings)}
@@ -1553,7 +1752,7 @@ export default function WildberriesReviewsAI() {
                   type="primary"
                   icon={<ReloadOutlined spin={loading} />}
                   loading={loading}
-                  onClick={loadFeedbacks}
+                  onClick={handleRefreshFeedbacks}
                 >
                   Обновить
                 </Button>
@@ -1564,28 +1763,140 @@ export default function WildberriesReviewsAI() {
 
         {/* Настройки AI */}
         <Drawer
-          title="Инструкции для AI"
+          title={
+            <Space>
+              <RobotOutlined style={{ color: '#1890ff' }} />
+              Настройки AI Assistant
+            </Space>
+          }
           placement="right"
           open={showSettings}
           onClose={() => setShowSettings(false)}
-          width={400}
+          width={500}
         >
-          <Space direction="vertical" size="middle" style={{ width: '100%' }}>
-            <Text>
-              Настройте дополнительные инструкции для генерации ответов AI:
-            </Text>
-            <TextArea
-              value={aiInstructions}
-              onChange={(e) => setAiInstructions(e.target.value)}
-              rows={6}
-              placeholder="Например: Используй неформальный стиль, добавляй эмодзи, предлагай скидку 10% на следующий заказ..."
-            />
+          <Space direction="vertical" size="large" style={{ width: '100%' }}>
             <Alert
-              message="Совет"
-              description="Чем более конкретные инструкции вы дадите, тем лучше будут ответы AI."
+              message="🤖 Персонализация AI ответов"
+              description="Эти инструкции напрямую влияют на генерацию ответов через OpenAI GPT-4o-mini. Изменения применяются к каждому новому ответу."
+              type="success"
+              showIcon
+            />
+
+            <div>
+              <Text strong style={{ fontSize: '16px', marginBottom: 8, display: 'block' }}>
+                Дополнительные инструкции для AI:
+              </Text>
+              <TextArea
+                value={aiInstructions}
+                onChange={(e) => setAiInstructions(e.target.value)}
+                rows={8}
+                placeholder="Введите ваши инструкции здесь..."
+                style={{ fontSize: '14px' }}
+              />
+              <Text type="secondary" style={{ fontSize: '12px', marginTop: 4, display: 'block' }}>
+                Символов: {aiInstructions.length}/1000
+              </Text>
+            </div>
+
+            <div>
+              <Text strong style={{ marginBottom: 8, display: 'block' }}>
+                📝 Примеры инструкций:
+              </Text>
+              <Collapse size="small">
+                <Panel header="🎨 Стиль общения" key="1">
+                  <Space direction="vertical" style={{ width: '100%' }}>
+                    <Button 
+                      type="link" 
+                      size="small"
+                      style={{ textAlign: 'left', padding: 0, height: 'auto' }}
+                      onClick={() => setAiInstructions("Используй дружелюбный и неформальный тон. Добавляй эмодзи для выражения эмоций. Обращайся на 'ты'.")}
+                    >
+                      • Неформальный стиль с эмодзи
+                    </Button>
+                    <Button 
+                      type="link" 
+                      size="small"
+                      style={{ textAlign: 'left', padding: 0, height: 'auto' }}
+                      onClick={() => setAiInstructions("Соблюдай официальный деловой стиль. Используй вежливые формы обращения. Избегай сокращений.")}
+                    >
+                      • Деловой официальный стиль
+                    </Button>
+                  </Space>
+                </Panel>
+                <Panel header="💰 Маркетинговые предложения" key="2">
+                  <Space direction="vertical" style={{ width: '100%' }}>
+                    <Button 
+                      type="link" 
+                      size="small"
+                      style={{ textAlign: 'left', padding: 0, height: 'auto' }}
+                      onClick={() => setAiInstructions("В каждом ответе предлагай скидку 10% на следующую покупку с промокодом СПАСИБО10.")}
+                    >
+                      • Предложение скидки 10%
+                    </Button>
+                    <Button 
+                      type="link" 
+                      size="small"
+                      style={{ textAlign: 'left', padding: 0, height: 'auto' }}
+                      onClick={() => setAiInstructions("Рекомендуй подписаться на рассылку для получения эксклюзивных предложений.")}
+                    >
+                      • Подписка на рассылку
+                    </Button>
+                  </Space>
+                </Panel>
+                <Panel header="🔧 Решение проблем" key="3">
+                  <Space direction="vertical" style={{ width: '100%' }}>
+                    <Button 
+                      type="link" 
+                      size="small"
+                      style={{ textAlign: 'left', padding: 0, height: 'auto' }}
+                      onClick={() => setAiInstructions("При негативных отзывах всегда предлагай связаться с поддержкой по телефону 8-800-XXX-XX-XX или email support@example.com.")}
+                    >
+                      • Контакты поддержки
+                    </Button>
+                    <Button 
+                      type="link" 
+                      size="small"
+                      style={{ textAlign: 'left', padding: 0, height: 'auto' }}
+                      onClick={() => setAiInstructions("Упоминай гарантию возврата денег в течение 30 дней при неудовлетворенности товаром.")}
+                    >
+                      • Гарантия возврата
+                    </Button>
+                  </Space>
+                </Panel>
+              </Collapse>
+            </div>
+
+            <Alert
+              message="💡 Как это работает"
+              description={
+                <div>
+                  <p style={{ margin: 0, marginBottom: 8 }}>
+                    Ваши инструкции добавляются к системному промпту GPT-4o-mini перед генерацией каждого ответа.
+                  </p>
+                  <Text code style={{ fontSize: '11px' }}>
+                    systemPrompt + ваши_инструкции + данные_отзыва → AI ответ
+                  </Text>
+                </div>
+              }
               type="info"
               showIcon
             />
+
+            <div style={{ borderTop: '1px solid #f0f0f0', paddingTop: 16 }}>
+              <Space>
+                <Button 
+                  type="primary" 
+                  onClick={() => setShowSettings(false)}
+                >
+                  Применить настройки
+                </Button>
+                <Button 
+                  onClick={() => setAiInstructions('')}
+                >
+                  Очистить
+                </Button>
+              </Space>
+            </div>
           </Space>
         </Drawer>
 
@@ -1611,54 +1922,7 @@ export default function WildberriesReviewsAI() {
               />
             )}
 
-            {/* Информация о медиафайлах */}
-            {filteredFeedbacks.some(f => f.photoLinks?.length || f.video) && (
-              <Alert
-                message="📸 Галерея медиафайлов"
-                description={
-                  <div>
-                    <p style={{ margin: 0, marginBottom: 8 }}>
-                      <strong>🖼️ Навигация по фотографиям:</strong> Кликните на любую фотографию для просмотра в полном размере с возможностью листания.
-                    </p>
-                    <ul style={{ margin: 0, paddingLeft: 16 }}>
-                      <li><strong>Управление:</strong> Стрелки ← → на клавиатуре или кнопки в галерее</li>
-                      <li><strong>Миниатюры:</strong> Быстрое переключение между фотографиями снизу</li>
-                      <li><strong>Полное качество:</strong> Клик по большой фотографии откроет оригинал в новой вкладке</li>
-                      <li><strong>Видео:</strong> HLS (.m3u8) файлы лучше открывать в новой вкладке</li>
-                      <li><strong>Прокси:</strong> Изображения загружаются через несколько серверов для обхода CORS</li>
-                    </ul>
-                  </div>
-                }
-                type="success"
-                showIcon
-                closable
-                style={{ marginBottom: 16 }}
-              />
-            )}
 
-            {/* Информация о статусах ответов */}
-            {filteredFeedbacks.some(f => f.answer) && (
-              <Alert
-                message="🔄 Мониторинг статусов ответов"
-                description={
-                  <div>
-                    <p style={{ margin: 0, marginBottom: 8 }}>
-                      <strong>📊 Отслеживание состояния ваших ответов:</strong> Теперь вы видите актуальные статусы всех отправленных ответов.
-                    </p>
-                    <ul style={{ margin: 0, paddingLeft: 16 }}>
-                      <li><strong>✅ Опубликован:</strong> Ответ виден всем пользователям Wildberries</li>
-                      <li><strong>🔄 Синхронизация:</strong> Ответ обрабатывается системой WB</li>
-                      <li><strong>📝 Редактируемый:</strong> Можно изменить в течение 60 дней</li>
-                      <li><strong>Консоль браузера:</strong> Подробная статистика всех статусов в логах</li>
-                    </ul>
-                  </div>
-                }
-                type="info"
-                showIcon
-                closable
-                style={{ marginBottom: 16 }}
-              />
-            )}
 
             {/* Список отзывов */}
             {loading && !filteredFeedbacks.length ? (
@@ -1680,7 +1944,29 @@ export default function WildberriesReviewsAI() {
               />
             ) : (
               <div>
-                {filteredFeedbacks.map(feedback => (
+                {/* Информация о пагинации */}
+                <div style={{ 
+                  marginBottom: 16, 
+                  padding: '12px 16px', 
+                  backgroundColor: '#f5f5f5', 
+                  borderRadius: 6,
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center'
+                }}>
+                  <Text type="secondary">
+                    Показано {paginatedFeedbacks.length} из {filteredFeedbacks.length} отзывов
+                    {filteredFeedbacks.length !== allFeedbacks.length && (
+                      <span> (всего загружено: {allFeedbacks.length})</span>
+                    )}
+                  </Text>
+                  <Text type="secondary">
+                    Страница {currentPage} из {Math.ceil(filteredFeedbacks.length / pageSize)}
+                  </Text>
+                </div>
+
+                {/* Отзывы */}
+                {paginatedFeedbacks.map(feedback => (
                   <FeedbackCard
                     key={feedback.id}
                     feedback={feedback}
@@ -1690,6 +1976,62 @@ export default function WildberriesReviewsAI() {
                     isGenerating={generatingFor === feedback.id}
                   />
                 ))}
+
+                {/* Кнопка "Загрузить еще" с сервера */}
+                {hasMoreFeedbacks && !loading && (
+                  <div style={{ 
+                    marginTop: 24, 
+                    marginBottom: 16,
+                    display: 'flex', 
+                    justifyContent: 'center'
+                  }}>
+                                         <Button
+                       type="dashed"
+                       size="large"
+                       icon={<ReloadOutlined />}
+                       loading={loadingMore}
+                       onClick={handleLoadMoreFeedbacks}
+                      style={{
+                        borderColor: '#1890ff',
+                        color: '#1890ff',
+                        fontWeight: 500
+                      }}
+                    >
+                      {loadingMore ? 'Загружаем еще...' : `Загрузить еще отзывы (загружено ${loadedCount})`}
+                    </Button>
+                  </div>
+                )}
+
+                {/* Пагинация */}
+                {filteredFeedbacks.length > pageSize && (
+                  <div style={{ 
+                    marginTop: 24, 
+                    display: 'flex', 
+                    justifyContent: 'center',
+                    padding: '20px 0'
+                  }}>
+                    <Pagination
+                      current={currentPage}
+                      total={filteredFeedbacks.length}
+                      pageSize={pageSize}
+                      showSizeChanger
+                      showQuickJumper
+                      showTotal={(total, range) => 
+                        `${range[0]}-${range[1]} из ${total} отзывов`
+                      }
+                      pageSizeOptions={['5', '10', '20', '50']}
+                      onChange={(page, size) => {
+                        setCurrentPage(page);
+                        if (size !== pageSize) {
+                          setPageSize(size);
+                          setCurrentPage(1);
+                        }
+                        // Прокрутка к началу страницы
+                        window.scrollTo({ top: 0, behavior: 'smooth' });
+                      }}
+                    />
+                  </div>
+                )}
               </div>
             )}
           </div>
