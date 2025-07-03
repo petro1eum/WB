@@ -48,17 +48,40 @@ import {
   LeftOutlined,
   RightOutlined,
   UpOutlined,
-  DownOutlined
+  DownOutlined,
+  SearchOutlined
 } from '@ant-design/icons';
 
 const { Header, Content } = Layout;
 const { Title, Text, Paragraph } = Typography;
 const { TextArea } = Input;
-const { Panel } = Collapse;
 
 // Вспомогательная функция для извлечения URL из PhotoInfo
 const getPhotoUrl = (photo: PhotoInfo, useFullSize = false): string => {
   return useFullSize ? photo.fullSize : photo.miniSize;
+};
+
+// Функция для анализа активности покупателя
+const getCustomerActivity = (lastOrderDate?: string) => {
+  if (!lastOrderDate) return null;
+  
+  const orderDate = new Date(lastOrderDate);
+  const now = new Date();
+  const daysDiff = Math.floor((now.getTime() - orderDate.getTime()) / (1000 * 60 * 60 * 24));
+  
+  if (daysDiff < 0) {
+    return { level: 'future', text: 'Будущий заказ', color: 'orange', description: 'Дата заказа в будущем (возможная ошибка)' };
+  } else if (daysDiff <= 7) {
+    return { level: 'very-active', text: 'Очень активный', color: 'success', description: 'Заказывал на этой неделе' };
+  } else if (daysDiff <= 30) {
+    return { level: 'active', text: 'Активный', color: 'processing', description: 'Заказывал в этом месяце' };
+  } else if (daysDiff <= 90) {
+    return { level: 'moderate', text: 'Умеренно активный', color: 'warning', description: 'Заказывал в последние 3 месяца' };
+  } else if (daysDiff <= 365) {
+    return { level: 'low', text: 'Малоактивный', color: 'default', description: 'Заказывал в этом году' };
+  } else {
+    return { level: 'inactive', text: 'Неактивный', color: 'error', description: 'Не заказывал больше года' };
+  }
 };
 
 // Функция для отображения статуса ответа
@@ -122,6 +145,10 @@ interface FeedbackData {
     productName?: string;
     brandName?: string;
     supplierArticle?: string;
+    imtId?: number;
+    nmId?: number;
+    supplierName?: string;
+    size?: string;
   };
   answer?: {
     text: string;
@@ -131,6 +158,31 @@ interface FeedbackData {
   // Медиафайлы согласно официальной документации Wildberries
   photoLinks?: PhotoInfo[];
   video?: VideoInfo;
+  
+  // 🆕 НОВЫЕ ПОЛЯ ИЗ WB API
+  state?: string;                               // статус отзыва на уровне самого отзыва
+  wasViewed?: boolean;                          // был ли отзыв просмотрен продавцом  
+  bables?: string[];                            // теги/бэйджи к отзыву ["стильный", "качественно"]
+  matchingSize?: string;                        // соответствие размера
+  
+
+  
+  // Возвраты
+  isAbleReturnProductOrders?: boolean;          // связан ли с возвратами
+  returnProductOrdersDate?: string | null;     // дата возврата
+  
+  // Дополнительные поля товара
+  color?: string;                               // цвет товара
+  subjectId?: number;                           // ID категории
+  subjectName?: string;                         // название категории
+  
+  // Связи между отзывами
+  parentFeedbackId?: string | null;             // родительский отзыв
+  childFeedbackId?: string | null;              // дочерний отзыв
+  
+  // Данные заказа
+  lastOrderShkId?: number;                      // ID последнего заказа
+  lastOrderCreatedAt?: string;                  // дата последнего заказа
 }
 
 interface StatsData {
@@ -207,6 +259,49 @@ class WildberriesAPI {
       return { error: true, errorText: (error as Error).message };
     }
   }
+
+  // 🆕 Поиск заказов продавца (только ваши заказы)
+  // ВНИМАНИЕ: Для Statistics API нужен ОТДЕЛЬНЫЙ токен из "Профиль → Настройки → Доступ к API"
+  async searchOrders(orderId?: string, dateFrom?: string, dateTo?: string, statisticsToken?: string): Promise<APIResponse<any[]>> {
+    try {
+      if (!statisticsToken) {
+        return { 
+          error: true, 
+          errorText: 'Для поиска заказов нужен токен Statistics API. Получите его в ЛК: Профиль → Настройки → Доступ к API (не "новому API"!)' 
+        };
+      }
+
+      const params = new URLSearchParams();
+      if (orderId) params.append('order', orderId);
+      if (dateFrom) params.append('dateFrom', dateFrom);
+      if (dateTo) params.append('dateTo', dateTo);
+      
+      // Statistics API использует key в параметрах, НЕ Authorization заголовок
+      params.append('key', statisticsToken);
+      
+      const baseUrl = 'https://statistics-api.wildberries.ru';
+      const response = await fetch(`${baseUrl}/api/v1/supplier/orders?${params}`, {
+        headers: {
+          'Content-Type': 'application/json'
+        }
+      });
+      
+      if (!response.ok) {
+        let errorMsg = `HTTP error! status: ${response.status}`;
+        if (response.status === 401) {
+          errorMsg += '. Проверьте токен Statistics API в настройках';
+        }
+        throw new Error(errorMsg);
+      }
+      
+      const data = await response.json();
+      return { data: data || [] };
+    } catch (error) {
+      return { error: true, errorText: (error as Error).message };
+    }
+  }
+
+
 }
 
 // OpenAI API клиент
@@ -288,6 +383,7 @@ interface FeedbackCardProps {
   aiReply?: string;
   onGenerateReply: (feedback: FeedbackData) => void;
   isGenerating: boolean;
+  onFindFeedback?: (feedbackId: string) => void; // 🆕 Функция поиска отзыва по ID
 }
 
 // Компонент безопасной загрузки изображений
@@ -899,7 +995,7 @@ function MediaGallery({ feedback }: { feedback: FeedbackData }) {
 }
 
 // Компонент отзыва
-function FeedbackCard({ feedback, onReply, aiReply, onGenerateReply, isGenerating }: FeedbackCardProps) {
+function FeedbackCard({ feedback, onReply, aiReply, onGenerateReply, isGenerating, onFindFeedback }: FeedbackCardProps) {
   const [replyText, setReplyText] = useState(aiReply || '');
   const [isEditing, setIsEditing] = useState(false);
 
@@ -929,6 +1025,7 @@ function FeedbackCard({ feedback, onReply, aiReply, onGenerateReply, isGeneratin
 
   return (
     <Card 
+      id={`feedback-${feedback.id}`}
       style={{ marginBottom: 16 }}
       title={
         <Row justify="space-between" align="middle">
@@ -945,8 +1042,27 @@ function FeedbackCard({ feedback, onReply, aiReply, onGenerateReply, isGeneratin
                 )}
               </Title>
               <Text type="secondary">
-                {feedback.productDetails?.brandName} • Артикул: {feedback.productDetails?.supplierArticle}
+                {feedback.productDetails?.brandName} • 
+                Артикул продавца: {feedback.productDetails?.supplierArticle}
+                {feedback.productDetails?.nmId && (
+                  <span> • WB: {feedback.productDetails.nmId}</span>
+                )}
               </Text>
+              {/* 🆕 Дополнительная информация из WB API */}
+              <div style={{ fontSize: '11px', color: '#999', marginTop: 2 }}>
+                {feedback.color && (
+                  <span style={{ marginRight: 8 }}>🎨 {feedback.color}</span>
+                )}
+                {feedback.subjectName && (
+                  <span style={{ marginRight: 8 }}>📂 {feedback.subjectName}</span>
+                )}
+                {feedback.wasViewed && (
+                  <span style={{ color: '#52c41a', marginRight: 8 }}>👁️ Просмотрено</span>
+                )}
+                {feedback.isAbleReturnProductOrders && feedback.returnProductOrdersDate && (
+                  <span style={{ color: '#ff4d4f', marginRight: 8 }}>🔄 Возврат</span>
+                )}
+              </div>
             </Space>
           </Col>
           <Col>
@@ -962,7 +1078,23 @@ function FeedbackCard({ feedback, onReply, aiReply, onGenerateReply, isGeneratin
     >
       <Space direction="vertical" size="middle" style={{ width: '100%' }}>
         <div>
-          <Text strong>{feedback.userName || 'Покупатель'}</Text>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+            <Text strong>{feedback.userName || 'Покупатель'}</Text>
+            {/* 🆕 Теги от покупателей (bables) */}
+            {feedback.bables && feedback.bables.length > 0 && (
+              <Space size="small">
+                {feedback.bables.map((tag, index) => (
+                  <Tag 
+                    key={index} 
+                    color="purple" 
+                    style={{ fontSize: '10px', margin: 0 }}
+                  >
+                    ✨ {tag}
+                  </Tag>
+                ))}
+              </Space>
+            )}
+          </div>
           {feedback.text && <Paragraph style={{ marginTop: 8 }}>{feedback.text}</Paragraph>}
           {feedback.pros && (
             <Paragraph>
@@ -977,6 +1109,96 @@ function FeedbackCard({ feedback, onReply, aiReply, onGenerateReply, isGeneratin
           
           {/* Отображение медиафайлов */}
           <MediaGallery feedback={feedback} />
+
+          {/* 🆕 Дополнительная техническая информация */}
+          {(feedback.matchingSize || feedback.parentFeedbackId || feedback.childFeedbackId || 
+            feedback.lastOrderShkId) && (
+            <Collapse 
+              size="small" 
+              style={{ marginTop: 8 }}
+              items={[
+                {
+                  key: '1',
+                  label: '📋 Техническая информация',
+                  children: (
+                    <Space direction="vertical" size="small" style={{ width: '100%' }}>
+                      {feedback.matchingSize && (
+                        <div>
+                          <Text type="secondary">📏 Соответствие размера:</Text>
+                          <Tag color="blue" style={{ marginLeft: 8 }}>{feedback.matchingSize}</Tag>
+                        </div>
+                      )}
+                      
+                      {feedback.parentFeedbackId && (
+                        <div>
+                          <Text type="secondary">🔗 Родительский отзыв:</Text>
+                          <Button 
+                            type="link" 
+                            size="small"
+                            style={{ padding: 0, height: 'auto', fontSize: '10px', marginLeft: 8 }}
+                            onClick={() => onFindFeedback?.(feedback.parentFeedbackId!)}
+                          >
+                            {feedback.parentFeedbackId}
+                          </Button>
+                        </div>
+                      )}
+                      
+                      {feedback.childFeedbackId && (
+                        <div>
+                          <Text type="secondary">🔗 Дочерний отзыв:</Text>
+                          <Button 
+                            type="link" 
+                            size="small"
+                            style={{ padding: 0, height: 'auto', fontSize: '10px', marginLeft: 8 }}
+                            onClick={() => onFindFeedback?.(feedback.childFeedbackId!)}
+                          >
+                            {feedback.childFeedbackId}
+                          </Button>
+                        </div>
+                      )}
+                      
+                      {feedback.lastOrderShkId && (
+                        <div style={{ marginBottom: 8 }}>
+                          <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
+                            <Text type="secondary">🛒 Последний заказ:</Text>
+                            <Tooltip title="Номер последнего заказа покупателя в системе WB (не обязательно ваш товар)">
+                              <Text code style={{ fontSize: '10px', cursor: 'help' }}>#{feedback.lastOrderShkId}</Text>
+                            </Tooltip>
+                            {feedback.lastOrderCreatedAt && (
+                              <>
+                                <Text type="secondary" style={{ fontSize: '10px' }}>
+                                  ({new Date(feedback.lastOrderCreatedAt).toLocaleDateString()})
+                                </Text>
+                                {(() => {
+                                  const activity = getCustomerActivity(feedback.lastOrderCreatedAt);
+                                  return activity ? (
+                                                                     <Tooltip title={activity.description}>
+                                       <Tag color={activity.color} style={{ fontSize: '11px', padding: '0 4px' }}>
+                                         {activity.text}
+                                       </Tag>
+                                     </Tooltip>
+                                  ) : null;
+                                })()}
+                              </>
+                            )}
+                          </div>
+                          <Alert
+                            message="💡 Информация о заказе"
+                            description="Это номер последнего заказа покупателя в системе Wildberries (не обязательно ваш товар). Детали заказа недоступны по соображениям конфиденциальности."
+                            type="info"
+                            showIcon
+                            style={{ marginTop: 8, fontSize: '11px' }}
+                            banner
+                          />
+                        </div>
+                      )}
+
+                    </Space>
+                  )
+                }
+              ]}
+            />
+          )}
         </div>
 
         {feedback.answer ? (
@@ -1079,6 +1301,7 @@ function FeedbackCard({ feedback, onReply, aiReply, onGenerateReply, isGeneratin
 export default function WildberriesReviewsAI() {
   const [wbToken, setWbToken] = useState(import.meta.env.VITE_WB || '');
   const [openaiKey, setOpenaiKey] = useState(import.meta.env.VITE_OPENAI_API_KEY || '');
+  const [statisticsToken, setStatisticsToken] = useState(import.meta.env.VITE_WB_STATISTICS || '');
   const [isConnected, setIsConnected] = useState(false);
   const [activeTab, setActiveTab] = useState('unanswered');
   const [allFeedbacks, setAllFeedbacks] = useState<FeedbackData[]>([]); // Все загруженные отзывы
@@ -1089,12 +1312,14 @@ export default function WildberriesReviewsAI() {
   const [aiReplies, setAiReplies] = useState<Record<string, string>>({});
   const [generatingFor, setGeneratingFor] = useState<string | null>(null);
   const [aiInstructions, setAiInstructions] = useState('');
+  
   const [showSettings, setShowSettings] = useState(false);
   
   // Новые состояния для фильтрации
   const [selectedRatings, setSelectedRatings] = useState<number[]>([1, 2, 3, 4, 5]); // По умолчанию все оценки
   const [showFilters, setShowFilters] = useState(false);
   const [hasMedia, setHasMedia] = useState<boolean | null>(null); // null = все, true = только с медиа, false = только без медиа
+  const [selectedBables, setSelectedBables] = useState<string[]>([]); // Фильтр по тегам
 
   // Состояния для пагинации
   const [currentPage, setCurrentPage] = useState(1);
@@ -1105,6 +1330,16 @@ export default function WildberriesReviewsAI() {
   const [loadedCount, setLoadedCount] = useState(0);
   const [hasMoreFeedbacks, setHasMoreFeedbacks] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
+
+  // 🆕 Состояния для поиска заказов
+  const [showOrderSearch, setShowOrderSearch] = useState(false);
+  const [orderSearchLoading, setOrderSearchLoading] = useState(false);
+  const [foundOrders, setFoundOrders] = useState<any[]>([]);
+  const [orderSearchForm, setOrderSearchForm] = useState({
+    orderId: '',
+    dateFrom: '',
+    dateTo: ''
+  });
 
   const wbApi = React.useRef<WildberriesAPI | null>(null);
   const openaiApi = React.useRef<OpenAIAPI | null>(null);
@@ -1119,7 +1354,11 @@ export default function WildberriesReviewsAI() {
       const feedbackHasMedia = !!(feedback.photoLinks?.length || feedback.video);
       const mediaMatch = hasMedia === null || feedbackHasMedia === hasMedia;
       
-      return ratingMatch && mediaMatch;
+      // 🆕 Фильтр по тегам bables
+      const bablesMatch = selectedBables.length === 0 || 
+        (feedback.bables && selectedBables.some(tag => feedback.bables!.includes(tag)));
+      
+      return ratingMatch && mediaMatch && bablesMatch;
     });
   };
 
@@ -1128,7 +1367,7 @@ export default function WildberriesReviewsAI() {
     const filtered = filterFeedbacks(allFeedbacks);
     setFilteredFeedbacks(filtered);
     setCurrentPage(1); // Сброс на первую страницу при изменении фильтров
-  }, [allFeedbacks, selectedRatings, hasMedia]);
+  }, [allFeedbacks, selectedRatings, hasMedia, selectedBables]);
 
   // Пагинация отфильтрованных отзывов
   const paginatedFeedbacks = filteredFeedbacks.slice(
@@ -1222,6 +1461,23 @@ export default function WildberriesReviewsAI() {
         photoCount,
         videoCount
       });
+
+      // 🆕 Анализ новых полей из WB API
+      const newFieldsStats = {
+        withBables: feedbacks.filter(f => f.bables && f.bables.length > 0).length,
+        totalBables: feedbacks.reduce((sum, f) => sum + (f.bables?.length || 0), 0),
+        wasViewed: feedbacks.filter(f => f.wasViewed).length,
+        withColor: feedbacks.filter(f => f.color).length,
+        withSubject: feedbacks.filter(f => f.subjectName).length,
+        withParentFeedback: feedbacks.filter(f => f.parentFeedbackId).length,
+        withChildFeedback: feedbacks.filter(f => f.childFeedbackId).length,
+
+        uniqueColors: [...new Set(feedbacks.map(f => f.color).filter(Boolean))],
+        uniqueSubjects: [...new Set(feedbacks.map(f => f.subjectName).filter(Boolean))],
+        allBables: [...new Set(feedbacks.flatMap(f => f.bables || []))]
+      };
+
+      console.log(`🆕 Статистика новых полей WB API:`, newFieldsStats);
 
       // Анализ статусов ответов
       const answerStatuses = new Set<string>();
@@ -1339,6 +1595,8 @@ export default function WildberriesReviewsAI() {
     setLoading(false);
   };
 
+
+
   // Обработчики фильтров
   const handleRatingChange = (rating: number, checked: boolean) => {
     if (checked) {
@@ -1356,6 +1614,62 @@ export default function WildberriesReviewsAI() {
     setSelectedRatings([]);
   };
 
+  // 🆕 Функция поиска заказов
+  const searchOrders = async () => {
+    if (!wbApi.current) return;
+    
+    setOrderSearchLoading(true);
+    try {
+      const result = await wbApi.current.searchOrders(
+        orderSearchForm.orderId || undefined,
+        orderSearchForm.dateFrom || undefined,
+        orderSearchForm.dateTo || undefined,
+        statisticsToken || undefined
+      );
+      
+      if (result.error) {
+        setError(`Ошибка поиска заказов: ${result.errorText}`);
+        setFoundOrders([]);
+      } else {
+        setFoundOrders(result.data || []);
+        if (result.data?.length === 0) {
+          setError('Заказы не найдены');
+        }
+      }
+    } catch (error) {
+      setError(`Ошибка поиска: ${(error as Error).message}`);
+      setFoundOrders([]);
+    }
+    setOrderSearchLoading(false);
+  };
+
+  // 🆕 Функция поиска отзыва по ID
+  const findFeedbackById = (feedbackId: string) => {
+    const feedback = allFeedbacks.find(f => f.id === feedbackId);
+    if (feedback) {
+      // Переходим к найденному отзыву
+      const index = filteredFeedbacks.findIndex(f => f.id === feedbackId);
+      if (index !== -1) {
+        const page = Math.ceil((index + 1) / pageSize);
+        setCurrentPage(page);
+        // Небольшая задержка для обновления пагинации
+        setTimeout(() => {
+          const element = document.getElementById(`feedback-${feedbackId}`);
+          if (element) {
+            element.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            // Подсветка найденного отзыва
+            element.style.backgroundColor = '#e6f7ff';
+            setTimeout(() => {
+              element.style.backgroundColor = '';
+            }, 2000);
+          }
+        }, 100);
+      }
+    } else {
+      alert('Отзыв не найден в загруженных данных');
+    }
+  };
+
   // Компонент фильтра
   const FilterDropdown = () => {
     const ratingCounts = [1, 2, 3, 4, 5].map(rating => ({
@@ -1367,6 +1681,8 @@ export default function WildberriesReviewsAI() {
       withMedia: allFeedbacks.filter(f => !!(f.photoLinks?.length || f.video)).length,
       withoutMedia: allFeedbacks.filter(f => !(f.photoLinks?.length || f.video)).length
     };
+
+
 
     return (
       <div style={{ 
@@ -1532,6 +1848,84 @@ export default function WildberriesReviewsAI() {
               </div>
             </Space>
           </div>
+
+          {/* 🆕 Фильтр по тегам bables */}
+          {allFeedbacks.some(f => f.bables && f.bables.length > 0) && (
+            <>
+              <Divider style={{ margin: 0 }} />
+              <div>
+                <div style={{ 
+                  marginBottom: 8, 
+                  fontWeight: 'bold',
+                  color: '#1890ff',
+                  fontSize: '14px'
+                }}>
+                  ✨ Фильтр по тегам
+                </div>
+                <div style={{ maxHeight: 150, overflowY: 'auto' }}>
+                  <Space direction="vertical" size="small" style={{ width: '100%' }}>
+                    {[...new Set(allFeedbacks.flatMap(f => f.bables || []))].map(tag => {
+                      const count = allFeedbacks.filter(f => f.bables?.includes(tag)).length;
+                      return (
+                        <div 
+                          key={tag} 
+                          style={{ 
+                            display: 'flex', 
+                            justifyContent: 'space-between', 
+                            alignItems: 'center',
+                            padding: '4px 8px',
+                            borderRadius: 4,
+                            transition: 'background-color 0.2s',
+                            cursor: 'pointer'
+                          }}
+                          onMouseEnter={(e) => {
+                            e.currentTarget.style.backgroundColor = '#f5f5f5';
+                          }}
+                          onMouseLeave={(e) => {
+                            e.currentTarget.style.backgroundColor = 'transparent';
+                          }}
+                          onClick={() => {
+                            if (selectedBables.includes(tag)) {
+                              setSelectedBables(prev => prev.filter(b => b !== tag));
+                            } else {
+                              setSelectedBables(prev => [...prev, tag]);
+                            }
+                          }}
+                        >
+                          <Checkbox
+                            checked={selectedBables.includes(tag)}
+                            onChange={(e) => {
+                              if (e.target.checked) {
+                                setSelectedBables(prev => [...prev, tag]);
+                              } else {
+                                setSelectedBables(prev => prev.filter(b => b !== tag));
+                              }
+                            }}
+                          >
+                            <Tag color="purple" style={{ fontSize: '11px', margin: 0 }}>
+                              ✨ {tag}
+                            </Tag>
+                          </Checkbox>
+                          <Tag color={count > 0 ? 'blue' : 'default'}>{count}</Tag>
+                        </div>
+                      );
+                    })}
+                  </Space>
+                </div>
+                {selectedBables.length > 0 && (
+                  <div style={{ marginTop: 8 }}>
+                    <Button 
+                      size="small" 
+                      type="default" 
+                      onClick={() => setSelectedBables([])}
+                    >
+                      Очистить теги
+                    </Button>
+                  </div>
+                )}
+              </div>
+            </>
+          )}
         </Space>
       </div>
     );
@@ -1586,13 +1980,16 @@ export default function WildberriesReviewsAI() {
                 <Title level={3}>Настройка подключения</Title>
 
                 <Form layout="vertical">
-                  <Form.Item label="Wildberries API Token">
+                  <Form.Item label="Wildberries API Token (для отзывов)">
                     <Input.Password
                       value={wbToken}
                       onChange={(e) => setWbToken(e.target.value)}
-                      placeholder="Введите токен WB"
+                      placeholder="Введите токен WB для отзывов"
                       size="large"
                     />
+                    <Text type="secondary" style={{ fontSize: '12px' }}>
+                      Получите в ЛК: Профиль → Настройки → <strong>Доступ к новому API</strong>
+                    </Text>
                   </Form.Item>
 
                   <Form.Item label="OpenAI API Key">
@@ -1629,15 +2026,20 @@ export default function WildberriesReviewsAI() {
                   description={
                     <div>
                       <ol style={{ paddingLeft: 20, margin: 0 }}>
-                        <li>Получите API токен WB в личном кабинете (Настройки → Доступ к API)</li>
+                        <li>Получите API токен WB для отзывов: ЛК → Настройки → <strong>Доступ к новому API</strong></li>
                         <li>Получите OpenAI API ключ на platform.openai.com</li>
                         <li>Модель GPT-4o mini стоит $0.15/1M входных и $0.60/1M выходных токенов</li>
                         <li>Введите оба токена и нажмите "Подключиться"</li>
                       </ol>
+                      <div style={{ marginTop: 12, padding: 8, backgroundColor: '#fff7e6', borderRadius: 4, border: '1px solid #ffd591' }}>
+                        <strong>⚠️ Важно:</strong> Для поиска заказов нужен отдельный токен из раздела <strong>"Доступ к API"</strong> (без "новому").
+                      </div>
                       <div style={{ marginTop: 12, padding: 8, backgroundColor: '#f0f0f0', borderRadius: 4 }}>
                         <strong>💡 Совет:</strong> Для разработки создайте файл <code>.env</code> с переменными:
                         <br />
-                        <code>VITE_WB=ваш_токен_wb</code>
+                        <code>VITE_WB=ваш_токен_отзывов</code>
+                        <br />
+                        <code>VITE_WB_STATISTICS=ваш_токен_статистики</code>
                         <br />
                         <code>VITE_OPENAI_API_KEY=ваш_ключ_openai</code>
                       </div>
@@ -1688,7 +2090,7 @@ export default function WildberriesReviewsAI() {
     }
   ];
 
-  const activeFiltersCount = (selectedRatings.length !== 5 ? 1 : 0) + (hasMedia !== null ? 1 : 0);
+  const activeFiltersCount = (selectedRatings.length !== 5 ? 1 : 0) + (hasMedia !== null ? 1 : 0) + (selectedBables.length > 0 ? 1 : 0);
 
   return (
     <ConfigProvider
@@ -1705,7 +2107,7 @@ export default function WildberriesReviewsAI() {
             <Col>
               <Space direction="vertical" size={0}>
                 <Title level={3} style={{ margin: 0, color: '#1890ff' }}>
-                  <RobotOutlined /> Wildberries Reviews AI
+                  <RobotOutlined /> DIDI отзывы
                 </Title>
                 {stats && (
                   <Text type="secondary">
@@ -1742,6 +2144,13 @@ export default function WildberriesReviewsAI() {
                     )}
                   </Button>
                 </Popover>
+                <Button
+                  icon={<SearchOutlined />}
+                  onClick={() => setShowOrderSearch(true)}
+                  type="dashed"
+                >
+                  Поиск заказов
+                </Button>
                 <Button
                   icon={<SettingOutlined />}
                   onClick={() => setShowSettings(!showSettings)}
@@ -1802,68 +2211,83 @@ export default function WildberriesReviewsAI() {
               <Text strong style={{ marginBottom: 8, display: 'block' }}>
                 📝 Примеры инструкций:
               </Text>
-              <Collapse size="small">
-                <Panel header="🎨 Стиль общения" key="1">
-                  <Space direction="vertical" style={{ width: '100%' }}>
-                    <Button 
-                      type="link" 
-                      size="small"
-                      style={{ textAlign: 'left', padding: 0, height: 'auto' }}
-                      onClick={() => setAiInstructions("Используй дружелюбный и неформальный тон. Добавляй эмодзи для выражения эмоций. Обращайся на 'ты'.")}
-                    >
-                      • Неформальный стиль с эмодзи
-                    </Button>
-                    <Button 
-                      type="link" 
-                      size="small"
-                      style={{ textAlign: 'left', padding: 0, height: 'auto' }}
-                      onClick={() => setAiInstructions("Соблюдай официальный деловой стиль. Используй вежливые формы обращения. Избегай сокращений.")}
-                    >
-                      • Деловой официальный стиль
-                    </Button>
-                  </Space>
-                </Panel>
-                <Panel header="💰 Маркетинговые предложения" key="2">
-                  <Space direction="vertical" style={{ width: '100%' }}>
-                    <Button 
-                      type="link" 
-                      size="small"
-                      style={{ textAlign: 'left', padding: 0, height: 'auto' }}
-                      onClick={() => setAiInstructions("В каждом ответе предлагай скидку 10% на следующую покупку с промокодом СПАСИБО10.")}
-                    >
-                      • Предложение скидки 10%
-                    </Button>
-                    <Button 
-                      type="link" 
-                      size="small"
-                      style={{ textAlign: 'left', padding: 0, height: 'auto' }}
-                      onClick={() => setAiInstructions("Рекомендуй подписаться на рассылку для получения эксклюзивных предложений.")}
-                    >
-                      • Подписка на рассылку
-                    </Button>
-                  </Space>
-                </Panel>
-                <Panel header="🔧 Решение проблем" key="3">
-                  <Space direction="vertical" style={{ width: '100%' }}>
-                    <Button 
-                      type="link" 
-                      size="small"
-                      style={{ textAlign: 'left', padding: 0, height: 'auto' }}
-                      onClick={() => setAiInstructions("При негативных отзывах всегда предлагай связаться с поддержкой по телефону 8-800-XXX-XX-XX или email support@example.com.")}
-                    >
-                      • Контакты поддержки
-                    </Button>
-                    <Button 
-                      type="link" 
-                      size="small"
-                      style={{ textAlign: 'left', padding: 0, height: 'auto' }}
-                      onClick={() => setAiInstructions("Упоминай гарантию возврата денег в течение 30 дней при неудовлетворенности товаром.")}
-                    >
-                      • Гарантия возврата
-                    </Button>
-                  </Space>
-                </Panel>
-              </Collapse>
+              <Collapse 
+                size="small"
+                items={[
+                  {
+                    key: '1',
+                    label: '🎨 Стиль общения',
+                    children: (
+                      <Space direction="vertical" style={{ width: '100%' }}>
+                        <Button 
+                          type="link" 
+                          size="small"
+                          style={{ textAlign: 'left', padding: 0, height: 'auto' }}
+                          onClick={() => setAiInstructions("Используй дружелюбный и неформальный тон. Добавляй эмодзи для выражения эмоций. Обращайся на 'ты'.")}
+                        >
+                          • Неформальный стиль с эмодзи
+                        </Button>
+                        <Button 
+                          type="link" 
+                          size="small"
+                          style={{ textAlign: 'left', padding: 0, height: 'auto' }}
+                          onClick={() => setAiInstructions("Соблюдай официальный деловой стиль. Используй вежливые формы обращения. Избегай сокращений.")}
+                        >
+                          • Деловой официальный стиль
+                        </Button>
+                      </Space>
+                    )
+                  },
+                  {
+                    key: '2',
+                    label: '💰 Маркетинговые предложения',
+                    children: (
+                      <Space direction="vertical" style={{ width: '100%' }}>
+                        <Button 
+                          type="link" 
+                          size="small"
+                          style={{ textAlign: 'left', padding: 0, height: 'auto' }}
+                          onClick={() => setAiInstructions("В каждом ответе предлагай скидку 10% на следующую покупку с промокодом СПАСИБО10.")}
+                        >
+                          • Предложение скидки 10%
+                        </Button>
+                        <Button 
+                          type="link" 
+                          size="small"
+                          style={{ textAlign: 'left', padding: 0, height: 'auto' }}
+                          onClick={() => setAiInstructions("Рекомендуй подписаться на рассылку для получения эксклюзивных предложений.")}
+                        >
+                          • Подписка на рассылку
+                        </Button>
+                      </Space>
+                    )
+                  },
+                  {
+                    key: '3',
+                    label: '🔧 Решение проблем',
+                    children: (
+                      <Space direction="vertical" style={{ width: '100%' }}>
+                        <Button 
+                          type="link" 
+                          size="small"
+                          style={{ textAlign: 'left', padding: 0, height: 'auto' }}
+                          onClick={() => setAiInstructions("При негативных отзывах всегда предлагай связаться с поддержкой по телефону 8-800-XXX-XX-XX или email support@example.com.")}
+                        >
+                          • Контакты поддержки
+                        </Button>
+                        <Button 
+                          type="link" 
+                          size="small"
+                          style={{ textAlign: 'left', padding: 0, height: 'auto' }}
+                          onClick={() => setAiInstructions("Упоминай гарантию возврата денег в течение 30 дней при неудовлетворенности товаром.")}
+                        >
+                          • Гарантия возврата
+                        </Button>
+                      </Space>
+                    )
+                  }
+                ]}
+              />
             </div>
 
             <Alert
@@ -1899,6 +2323,137 @@ export default function WildberriesReviewsAI() {
             </div>
           </Space>
         </Drawer>
+
+        {/* 🆕 Модальное окно поиска заказов */}
+        <Modal
+          title={
+            <Space>
+              <SearchOutlined style={{ color: '#1890ff' }} />
+              Поиск ваших заказов
+            </Space>
+          }
+          open={showOrderSearch}
+          onCancel={() => {
+            setShowOrderSearch(false);
+            setFoundOrders([]);
+            setError('');
+          }}
+          footer={null}
+          width={800}
+        >
+          <Space direction="vertical" size="large" style={{ width: '100%' }}>
+            <Alert
+              message="⚠️ Требуется отдельный токен"
+              description={
+                <div>
+                  <strong>Для поиска заказов нужен токен Statistics API</strong><br />
+                  <ol style={{ paddingLeft: 20, margin: '8px 0 0 0' }}>
+                    <li>ЛК Wildberries → Профиль → Настройки → <strong>"Доступ к API"</strong> (НЕ "новому API"!)</li>
+                    <li>Сгенерируйте токен для статистики</li>
+                    <li>Введите его ниже</li>
+                  </ol>
+                  Можно найти только ваши заказы (заказы ваших товаров).
+                </div>
+              }
+              type="warning"
+              showIcon
+              banner
+            />
+
+            <Form layout="vertical">
+              <Form.Item 
+                label="Токен Statistics API" 
+                required
+                help="Получите в ЛК: Профиль → Настройки → Доступ к API"
+              >
+                <Input.Password
+                  placeholder="Введите токен для Statistics API"
+                  value={statisticsToken}
+                  onChange={(e) => setStatisticsToken(e.target.value)}
+                  size="large"
+                />
+              </Form.Item>
+
+              <Row gutter={16}>
+                <Col span={8}>
+                  <Form.Item label="Номер заказа">
+                    <Input
+                      placeholder="31818761016"
+                      value={orderSearchForm.orderId}
+                      onChange={(e) => setOrderSearchForm(prev => ({ ...prev, orderId: e.target.value }))}
+                    />
+                  </Form.Item>
+                </Col>
+                <Col span={8}>
+                  <Form.Item label="Дата от">
+                    <Input
+                      type="date"
+                      value={orderSearchForm.dateFrom}
+                      onChange={(e) => setOrderSearchForm(prev => ({ ...prev, dateFrom: e.target.value }))}
+                    />
+                  </Form.Item>
+                </Col>
+                <Col span={8}>
+                  <Form.Item label="Дата до">
+                    <Input
+                      type="date"
+                      value={orderSearchForm.dateTo}
+                      onChange={(e) => setOrderSearchForm(prev => ({ ...prev, dateTo: e.target.value }))}
+                    />
+                  </Form.Item>
+                </Col>
+              </Row>
+
+              <Button
+                type="primary"
+                icon={<SearchOutlined />}
+                loading={orderSearchLoading}
+                onClick={searchOrders}
+                size="large"
+                style={{ width: '100%' }}
+                disabled={!statisticsToken}
+              >
+                {orderSearchLoading ? 'Поиск...' : 'Найти заказы'}
+              </Button>
+            </Form>
+
+            {foundOrders.length > 0 && (
+              <div>
+                <Title level={4}>Найденные заказы ({foundOrders.length})</Title>
+                <div style={{ maxHeight: 400, overflowY: 'auto' }}>
+                  {foundOrders.map((order, index) => (
+                    <Card 
+                      key={index} 
+                      size="small" 
+                      style={{ marginBottom: 8 }}
+                      title={`Заказ #${order.id || 'Неизвестно'}`}
+                    >
+                      <Row gutter={16}>
+                        <Col span={12}>
+                          <Text strong>Товар:</Text> {order.subject || 'Не указан'}<br />
+                          <Text strong>Бренд:</Text> {order.brand || 'Не указан'}<br />
+                          <Text strong>Артикул:</Text> {order.supplierArticle || 'Не указан'}
+                        </Col>
+                        <Col span={12}>
+                          <Text strong>Дата:</Text> {order.date ? new Date(order.date).toLocaleDateString() : 'Не указана'}<br />
+                          <Text strong>Статус:</Text> {order.status || 'Не указан'}<br />
+                          <Text strong>Цена:</Text> {order.price ? `${order.price} ₽` : 'Не указана'}
+                        </Col>
+                      </Row>
+                    </Card>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {foundOrders.length === 0 && !orderSearchLoading && orderSearchForm.orderId && (
+              <Empty 
+                description="Заказы не найдены" 
+                image={Empty.PRESENTED_IMAGE_SIMPLE}
+              />
+            )}
+          </Space>
+        </Modal>
 
         {/* Контент */}
         <Content style={{ padding: '24px', backgroundColor: '#f0f2f5' }}>
@@ -1974,6 +2529,7 @@ export default function WildberriesReviewsAI() {
                     onGenerateReply={generateReply}
                     onReply={sendReply}
                     isGenerating={generatingFor === feedback.id}
+                    onFindFeedback={findFeedbackById}
                   />
                 ))}
 
